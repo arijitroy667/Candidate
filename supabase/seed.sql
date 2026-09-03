@@ -1,0 +1,2 @@
+-- Seed data will be added with the first domain slice.
+-- Supabase Auth users should be created through Auth, not this file.
