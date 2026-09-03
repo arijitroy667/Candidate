@@ -12,13 +12,16 @@ from app.core.auth import (create_access_token, get_current_user, hash_password,
                            require_roles, verify_password)
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.domain import (Application, CandidateProfile, Company, CompanyMember,
-                               HiringPipeline, Job, PipelineStage, User)
+from app.models.domain import (Application, Assessment, AssessmentAttempt,
+                               AssessmentQuestion, AssessmentResult, CandidateProfile,
+                               CandidateSubmission, Company, CompanyMember, HiringPipeline,
+                               Job, PipelineStage, QuestionBank, TestCase, User)
 from app.models.domain import Resume
 from app.schemas.api import (AuthLogin, AuthRegister, CompanyCreate, CompanyUpdate,
                              JobCreate, JobUpdate, MemberInvite, PasswordChange,
                              PipelineCreate, ProfileUpdate, StatusUpdate)
-from app.schemas.api import ResumeCreate
+from app.schemas.api import (AssessmentCreate, AttemptSubmit, QuestionBankCreate,
+                             QuestionCreate, ResumeCreate)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -296,3 +299,179 @@ def update_application_status(application_id: str, body: StatusUpdate, user: Use
     if body.status not in transitions.get(application.status, set()):
         raise HTTPException(409, f"Cannot move application from {application.status} to {body.status}")
     application.status = body.status; db.commit(); db.refresh(application); return {"data": data(application)}
+
+
+def assessment_for_company(assessment_id: str, user: User, db: Session) -> Assessment:
+    company = company_for(db, user)
+    assessment = db.scalar(select(Assessment).where(Assessment.id == assessment_id, Assessment.company_id == company.id))
+    if not assessment:
+        raise HTTPException(404, "Assessment not found")
+    return assessment
+
+
+def assessment_payload(assessment: Assessment, db: Session, include_answers: bool = False) -> dict:
+    result = data(assessment)
+    result["rules"] = json.loads(assessment.rules)
+    questions = db.scalars(select(AssessmentQuestion).where(AssessmentQuestion.assessment_id == assessment.id).order_by(AssessmentQuestion.position)).all()
+    result["questions"] = []
+    for question in questions:
+        item = data(question)
+        item["options"] = json.loads(question.options)
+        if not include_answers:
+            item.pop("correct_answer", None)
+        result["questions"].append(item)
+    return result
+
+
+def is_expired(expires_at: datetime) -> bool:
+    normalized = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    return normalized < datetime.now(timezone.utc)
+
+
+@router.post("/assessments", status_code=201, tags=["assessments"])
+def create_assessment(body: AssessmentCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == body.job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    assessment = Assessment(company_id=job.company_id, rules=json.dumps(body.rules), **body.model_dump(exclude={"rules"}))
+    db.add(assessment); db.commit(); db.refresh(assessment)
+    return {"data": assessment_payload(assessment, db, include_answers=True)}
+
+
+@router.get("/assessments", tags=["assessments"])
+def list_assessments(user: User = Depends(company_user), db: Session = Depends(get_db)):
+    company = company_for(db, user)
+    items = db.scalars(select(Assessment).where(Assessment.company_id == company.id)).all()
+    return {"data": [assessment_payload(item, db, include_answers=True) for item in items]}
+
+
+@router.get("/assessments/{assessment_id}", tags=["assessments"])
+def get_assessment(assessment_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    return {"data": assessment_payload(assessment_for_company(assessment_id, user, db), db, include_answers=True)}
+
+
+@router.post("/question-banks", status_code=201, tags=["assessments"])
+def create_question_bank(body: QuestionBankCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    bank = QuestionBank(company_id=company_for(db, user).id, **body.model_dump())
+    db.add(bank); db.commit(); db.refresh(bank)
+    return {"data": data(bank)}
+
+
+@router.post("/assessments/{assessment_id}/questions", status_code=201, tags=["assessments"])
+def add_question(assessment_id: str, body: QuestionCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    assessment = assessment_for_company(assessment_id, user, db)
+    if body.question_type not in {"MCQ", "CODING", "SUBJECTIVE", "TRUE_FALSE"}:
+        raise HTTPException(400, "Unsupported question type")
+    if body.question_type in {"MCQ", "TRUE_FALSE"} and not body.correct_answer:
+        raise HTTPException(400, "Objective questions require a correct answer")
+    if body.question_type == "CODING" and not body.programming_language:
+        raise HTTPException(400, "Coding questions require a programming language")
+    if body.question_bank_id:
+        bank = db.scalar(select(QuestionBank).where(QuestionBank.id == body.question_bank_id, QuestionBank.company_id == assessment.company_id))
+        if not bank:
+            raise HTTPException(404, "Question bank not found")
+    question = AssessmentQuestion(assessment_id=assessment.id, options=json.dumps(body.options), **body.model_dump(exclude={"options", "test_cases"}))
+    db.add(question); db.flush()
+    for test_case in body.test_cases:
+        if body.question_type != "CODING" or "expected_output" not in test_case:
+            raise HTTPException(422, "Coding test cases require expected_output")
+        db.add(TestCase(question_id=question.id, input_data=str(test_case.get("input_data", "")), expected_output=str(test_case["expected_output"]), is_hidden=bool(test_case.get("is_hidden", True)), points=float(test_case.get("points", 1))))
+    db.commit(); db.refresh(question)
+    item = data(question); item["options"] = json.loads(question.options)
+    return {"data": item}
+
+
+def candidate_attempt(attempt_id: str, user: User, db: Session) -> tuple[AssessmentAttempt, Assessment]:
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    attempt = db.get(AssessmentAttempt, attempt_id)
+    if not attempt or not profile:
+        raise HTTPException(404, "Assessment attempt not found")
+    application = db.scalar(select(Application).where(Application.id == attempt.application_id, Application.candidate_id == profile.id))
+    if not application:
+        raise HTTPException(403, "Forbidden")
+    assessment = db.get(Assessment, attempt.assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Assessment not found")
+    return attempt, assessment
+
+
+@router.post("/applications/{application_id}/assessment/{assessment_id}/start", status_code=201, tags=["assessments"])
+def start_attempt(application_id: str, assessment_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    application = db.scalar(select(Application).where(Application.id == application_id, Application.candidate_id == (profile.id if profile else "")))
+    assessment = db.get(Assessment, assessment_id)
+    if not application or not assessment or not assessment.is_active:
+        raise HTTPException(404, "Application or assessment not found")
+    if not db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == assessment.company_id)):
+        raise HTTPException(403, "Assessment is not assigned to this application")
+    completed = db.scalars(select(AssessmentAttempt).where(AssessmentAttempt.application_id == application_id, AssessmentAttempt.assessment_id == assessment_id)).all()
+    if len(completed) >= assessment.max_attempts:
+        raise HTTPException(409, "Maximum assessment attempts reached")
+    attempt = AssessmentAttempt(assessment_id=assessment.id, application_id=application.id, attempt_number=len(completed) + 1, expires_at=datetime.now(timezone.utc) + timedelta(seconds=assessment.duration_seconds))
+    db.add(attempt); db.commit(); db.refresh(attempt)
+    return {"data": {"attempt": data(attempt), "assessment": assessment_payload(assessment, db)}}
+
+
+@router.get("/assessment-attempts/{attempt_id}", tags=["assessments"])
+def get_attempt(attempt_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    attempt, assessment = candidate_attempt(attempt_id, user, db)
+    if attempt.status == "IN_PROGRESS" and is_expired(attempt.expires_at):
+        attempt.status = "EXPIRED"; db.commit()
+    return {"data": {"attempt": data(attempt), "assessment": assessment_payload(assessment, db)}}
+
+
+def finalize_attempt(attempt: AssessmentAttempt, assessment: Assessment, db: Session) -> AssessmentResult:
+    questions = db.scalars(select(AssessmentQuestion).where(AssessmentQuestion.assessment_id == assessment.id)).all()
+    submissions = {item.question_id: item for item in db.scalars(select(CandidateSubmission).where(CandidateSubmission.attempt_id == attempt.id)).all()}
+    total_points = sum(question.points for question in questions)
+    earned = sum(float(submissions[question.id].score or 0) for question in questions if question.id in submissions)
+    score = round((earned / total_points) * 100, 2) if total_points else 0
+    result = AssessmentResult(attempt_id=attempt.id, score=score, passing_score=assessment.passing_score, passed=score >= assessment.passing_score, breakdown=json.dumps({"earned_points": earned, "total_points": total_points, "pending_manual_review": sum(1 for item in submissions.values() if item.status == "PENDING_REVIEW")}))
+    attempt.status = "SUBMITTED"; attempt.submitted_at = datetime.now(timezone.utc); attempt.raw_score = earned; attempt.normalized_score = score; attempt.passed = result.passed
+    db.add(result); db.commit(); db.refresh(result)
+    return result
+
+
+@router.post("/assessment-attempts/{attempt_id}/submit", tags=["assessments"])
+def submit_attempt(attempt_id: str, body: AttemptSubmit, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    attempt, assessment = candidate_attempt(attempt_id, user, db)
+    if attempt.status != "IN_PROGRESS":
+        raise HTTPException(409, "Attempt is no longer active")
+    now_utc = datetime.now(timezone.utc)
+    if is_expired(attempt.expires_at):
+        attempt.status = "EXPIRED"; db.commit(); raise HTTPException(409, "Assessment time limit has expired")
+    questions = {item.id: item for item in db.scalars(select(AssessmentQuestion).where(AssessmentQuestion.assessment_id == assessment.id)).all()}
+    for submission in body.submissions:
+        question = questions.get(submission.question_id)
+        if not question:
+            raise HTTPException(422, "Question does not belong to this assessment")
+        existing = db.scalar(select(CandidateSubmission).where(CandidateSubmission.attempt_id == attempt.id, CandidateSubmission.question_id == question.id))
+        if existing:
+            existing.answer = submission.answer; existing.submitted_at = now_utc
+            target = existing
+        else:
+            target = CandidateSubmission(attempt_id=attempt.id, question_id=question.id, answer=submission.answer); db.add(target)
+        if question.question_type in {"MCQ", "TRUE_FALSE"}:
+            target.status = "GRADED"; target.score = question.points if submission.answer.strip().lower() == (question.correct_answer or "").strip().lower() else 0; target.feedback = "Correct" if target.score else "Incorrect"
+        elif question.question_type == "CODING":
+            target.status = "PENDING_REVIEW"; target.feedback = "Coding execution is queued for the secure runner"
+        else:
+            target.status = "PENDING_REVIEW"; target.feedback = "Subjective response requires review"
+    db.flush(); result = finalize_attempt(attempt, assessment, db)
+    return {"data": {"attempt": data(attempt), "result": data(result) | {"breakdown": json.loads(result.breakdown)}}}
+
+
+@router.get("/assessment-attempts/{attempt_id}/result", tags=["assessments"])
+def get_attempt_result(attempt_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    attempt = db.get(AssessmentAttempt, attempt_id)
+    if not attempt:
+        raise HTTPException(404, "Assessment attempt not found")
+    if user.role == "CANDIDATE":
+        candidate_attempt(attempt_id, user, db)
+    else:
+        assessment_for_company(attempt.assessment_id, user, db)
+    result = db.scalar(select(AssessmentResult).where(AssessmentResult.attempt_id == attempt.id))
+    if not result:
+        raise HTTPException(404, "Assessment result not available")
+    payload = data(result); payload["breakdown"] = json.loads(result.breakdown)
+    return {"data": payload}

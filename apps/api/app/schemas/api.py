@@ -86,3 +86,40 @@ class ResumeCreate(BaseModel):
 
 class StatusUpdate(BaseModel):
     status: str
+
+
+class AssessmentCreate(BaseModel):
+    job_id: str
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    duration_seconds: int = Field(default=3600, ge=60, le=86400)
+    passing_score: float = Field(default=60, ge=0, le=100)
+    max_attempts: int = Field(default=1, ge=1, le=10)
+    rules: dict[str, Any] = {}
+
+
+class QuestionBankCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class QuestionCreate(BaseModel):
+    question_text: str = Field(min_length=1)
+    question_type: str = "MCQ"
+    points: float = Field(default=1, gt=0)
+    position: int = Field(default=0, ge=0)
+    options: list[str] = []
+    correct_answer: str | None = None
+    starter_code: str | None = None
+    programming_language: str | None = None
+    question_bank_id: str | None = None
+    test_cases: list[dict[str, Any]] = []
+
+
+class SubmissionCreate(BaseModel):
+    question_id: str
+    answer: str
+
+
+class AttemptSubmit(BaseModel):
+    submissions: list[SubmissionCreate] = []
