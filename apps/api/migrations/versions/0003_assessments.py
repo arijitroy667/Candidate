@@ -1,6 +1,7 @@
 """Add assessment authoring and candidate attempt tables."""
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision = "0003_assessments"
 down_revision = "0002_resumes"
@@ -9,6 +10,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "assessments" in inspect(op.get_bind()).get_table_names():
+        return
     op.create_table("assessments",
         sa.Column("id", sa.String(36), primary_key=True), sa.Column("company_id", sa.String(36), sa.ForeignKey("companies.id"), nullable=False), sa.Column("job_id", sa.String(36), sa.ForeignKey("jobs.id"), nullable=False), sa.Column("name", sa.String(255), nullable=False), sa.Column("description", sa.Text(), nullable=True), sa.Column("duration_seconds", sa.Integer(), nullable=False, server_default="3600"), sa.Column("passing_score", sa.Float(), nullable=False, server_default="60"), sa.Column("max_attempts", sa.Integer(), nullable=False, server_default="1"), sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()), sa.Column("rules", sa.Text(), nullable=False, server_default="{}"), sa.Column("created_at", sa.DateTime(timezone=True), nullable=False))
     op.create_index("ix_assessments_company_id", "assessments", ["company_id"]); op.create_index("ix_assessments_job_id", "assessments", ["job_id"])

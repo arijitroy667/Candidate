@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 from app.db.session import Base
 
@@ -15,13 +16,9 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(Text)
     full_name: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(40), default="CANDIDATE", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -64,6 +61,7 @@ class Resume(Base):
     storage_key: Mapped[str] = mapped_column(String(500))
     mime_type: Mapped[str] = mapped_column(String(100))
     parse_status: Mapped[str] = mapped_column(String(30), default="UPLOADED")
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -100,6 +98,7 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
     application_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pipeline_id: Mapped[str | None] = mapped_column(ForeignKey("hiring_pipelines.id"), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

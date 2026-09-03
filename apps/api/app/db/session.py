@@ -11,12 +11,13 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+engine = create_engine(settings.database_url_for_sqlalchemy, pool_pre_ping=True) if settings.database_url else None
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False) if engine else None
 
 
 def get_db() -> Generator[Session, None, None]:
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL must point to Supabase PostgreSQL")
     db = SessionLocal()
     try:
         yield db

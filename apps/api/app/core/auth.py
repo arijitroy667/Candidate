@@ -1,17 +1,13 @@
-from datetime import datetime, timedelta, timezone
-import hashlib
-import hmac
-import secrets
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
+from app.db.supabase import get_supabase_auth_client
 from app.models.domain import User
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -24,35 +20,23 @@ def get_current_user(
 ) -> User:
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    secret = settings.supabase_jwt_secret or settings.jwt_secret
+    if not settings.supabase_jwt_secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Supabase JWT verification is not configured")
+    token = credentials.credentials
     try:
-        payload = jwt.decode(credentials.credentials, secret, algorithms=["HS256"], options={"verify_aud": False})
-    except JWTError as error:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from error
-    user = db.get(User, payload.get("sub"))
+        payload = jwt.decode(token, settings.supabase_jwt_secret, algorithms=["HS256"], audience="authenticated")
+        user_id = payload.get("sub")
+    except JWTError:
+        auth = get_supabase_auth_client()
+        try:
+            verified = auth.auth.get_user(token) if auth else None
+            user_id = str(verified.user.id) if verified and verified.user else None
+        except Exception as error:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from error
+    user = db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or missing")
     return user
-
-
-def create_access_token(user: User, settings: Settings) -> str:
-    expires = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
-    return jwt.encode({"sub": user.id, "role": user.role, "exp": expires}, settings.jwt_secret, algorithm="HS256")
-
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
-    return f"pbkdf2_sha256$310000${salt.hex()}${digest.hex()}"
-
-
-def verify_password(password: str, encoded: str) -> bool:
-    try:
-        algorithm, rounds, salt, digest = encoded.split("$")
-        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(rounds))
-        return algorithm == "pbkdf2_sha256" and hmac.compare_digest(actual.hex(), digest)
-    except (ValueError, TypeError):
-        return False
 
 
 def require_roles(*roles: str):

@@ -8,14 +8,14 @@ from app.db.session import Base
 from app.models import domain  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url_for_sqlalchemy.replace("%", "%%"))
 if config.config_file_name:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=get_settings().database_url, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"})
+    context.configure(url=get_settings().database_url_for_sqlalchemy, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"})
     with context.begin_transaction(): context.run_migrations()
 
 

@@ -1,12 +1,13 @@
 import logging
 
 from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.api.v1.routes import router as v1_router
-from app.db.session import Base, engine
 from app.models import domain  # noqa: F401
 
 settings = get_settings()
@@ -21,15 +22,26 @@ api_router = APIRouter(prefix="/api/v1")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "candidex-api"}
 
+@api_router.get("/health/ready", tags=["system"])
+def readiness() -> dict[str, str]:
+    if engine is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is not configured")
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as error:
+        logging.getLogger(__name__).warning("Database readiness check failed", exc_info=error)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is unavailable") from error
+    return {"status": "ready", "database": "supabase-postgresql"}
+
 
 app.include_router(api_router)
 app.include_router(v1_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
-def create_local_schema() -> None:
-    if settings.database_url.startswith("sqlite"):
-        Base.metadata.create_all(bind=engine)
+def validate_supabase_configuration() -> None:
+    settings.validate_supabase()
 
 
 @app.exception_handler(Exception)

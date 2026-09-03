@@ -15,6 +15,12 @@ class AuthLogin(BaseModel):
     email: EmailStr
     password: str
 
+class AuthRefresh(BaseModel):
+    refresh_token: str
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
 
 class PasswordChange(BaseModel):
     current_password: str

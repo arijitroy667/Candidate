@@ -1,25 +1,24 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import (create_access_token, get_current_user, hash_password,
-                           require_roles, verify_password)
+from app.core.auth import get_current_user, require_roles
 from app.core.config import get_settings
 from app.db.session import get_db
+from app.db.supabase import get_supabase_auth_client, get_supabase_client
 from app.models.domain import (Application, Assessment, AssessmentAttempt,
                                AssessmentQuestion, AssessmentResult, CandidateProfile,
                                CandidateSubmission, Company, CompanyMember, HiringPipeline,
                                Job, PipelineStage, QuestionBank, TestCase, User)
 from app.models.domain import Resume
-from app.schemas.api import (AuthLogin, AuthRegister, CompanyCreate, CompanyUpdate,
+from app.schemas.api import (AuthLogin, AuthRefresh, AuthRegister, CompanyCreate, CompanyUpdate,
                              JobCreate, JobUpdate, MemberInvite, PasswordChange,
-                             PipelineCreate, ProfileUpdate, StatusUpdate)
+                             PasswordResetRequest, PipelineCreate, ProfileUpdate, StatusUpdate)
 from app.schemas.api import (AssessmentCreate, AttemptSubmit, QuestionBankCreate,
                              QuestionCreate, ResumeCreate)
 
@@ -33,7 +32,7 @@ def data(item):
 
 
 def user_data(user: User) -> dict:
-    return {key: value for key, value in data(user).items() if key not in {"password_hash", "verification_token", "verification_expires_at"}}
+    return data(user)
 
 
 def company_for(db: Session, user: User) -> Company:
@@ -44,10 +43,6 @@ def company_for(db: Session, user: User) -> Company:
     return company
 
 
-def user_response(user: User, settings) -> dict:
-    return {"user": user_data(user), "access_token": create_access_token(user, settings), "token_type": "bearer"}
-
-
 @router.post("/auth/register", status_code=201, tags=["auth"])
 def register(body: AuthRegister, db: Session = Depends(get_db)):
     if body.role not in {"COMPANY_ADMIN", "RECRUITER", "CANDIDATE"}:
@@ -55,19 +50,44 @@ def register(body: AuthRegister, db: Session = Depends(get_db)):
     email = body.email.lower()
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(409, "Email is already registered")
-    user = User(email=email, full_name=body.full_name, role=body.role,
-                password_hash=hash_password(body.password), verification_token=uuid4().hex,
-                verification_expires_at=datetime.now(timezone.utc) + timedelta(hours=get_settings().email_verification_expiry_hours))
+    auth = get_supabase_auth_client()
+    if auth is None: raise HTTPException(503, "Supabase Auth is not configured")
+    try:
+        result = auth.auth.sign_up({"email": email, "password": body.password, "options": {"data": {"full_name": body.full_name, "role": body.role}}})
+    except Exception as error:
+        logger.exception("Supabase registration failed")
+        raise HTTPException(400, "Registration failed") from error
+    if not result.user: raise HTTPException(400, "Registration failed")
+    user = User(id=str(result.user.id), email=email, full_name=body.full_name, role=body.role)
     db.add(user); db.commit(); db.refresh(user)
-    return {"data": user_response(user, get_settings())}
+    session = result.session
+    return {"data": {"user": user_data(user), "session": session,
+                      "access_token": session.access_token if session else None,
+                      "refresh_token": session.refresh_token if session else None}}
 
 
 @router.post("/auth/login", tags=["auth"])
 def login(body: AuthLogin, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == body.email.lower()))
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
-    return {"data": user_response(user, get_settings())}
+    auth = get_supabase_auth_client()
+    if auth is None: raise HTTPException(503, "Supabase Auth is not configured")
+    try:
+        result = auth.auth.sign_in_with_password({"email": body.email.lower(), "password": body.password})
+    except Exception as error:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password") from error
+    user = db.get(User, str(result.user.id)) if result.user else None
+    if not user or not user.is_active: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Application user is not active")
+    session = result.session
+    return {"data": {"user": user_data(user), "session": session,
+                      "access_token": session.access_token if session else None,
+                      "refresh_token": session.refresh_token if session else None}}
+
+@router.post("/auth/refresh", tags=["auth"])
+def refresh_session(body: AuthRefresh):
+    auth = get_supabase_auth_client()
+    if auth is None: raise HTTPException(503, "Supabase Auth is not configured")
+    try: result = auth.auth.refresh_session(body.refresh_token)
+    except Exception as error: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token") from error
+    return {"data": {"session": result.session}}
 
 
 @router.post("/auth/logout", tags=["auth"])
@@ -80,20 +100,29 @@ def me(user: User = Depends(get_current_user)):
     return {"data": user_data(user)}
 
 
-@router.post("/auth/verify-email", tags=["auth"])
-def verify_email(token: str, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.verification_token == token))
-    if not user or not user.verification_expires_at or user.verification_expires_at < datetime.now(timezone.utc):
-        raise HTTPException(400, "Verification token is invalid or expired")
-    user.email_verified = True; user.verification_token = None; db.commit()
-    return {"data": {"message": "Email verified"}}
+@router.post("/auth/resend-verification", tags=["auth"])
+def resend_verification(email: str):
+    auth = get_supabase_auth_client()
+    if auth is None: raise HTTPException(503, "Supabase Auth is not configured")
+    try: auth.auth.resend({"type": "signup", "email": email.lower()})
+    except Exception as error: raise HTTPException(400, "Unable to resend verification email") from error
+    return {"data": {"message": "Verification email requested"}}
+
+@router.post("/auth/password/reset", tags=["auth"])
+def request_password_reset(body: PasswordResetRequest):
+    auth = get_supabase_auth_client()
+    if auth is None: raise HTTPException(503, "Supabase Auth is not configured")
+    try: auth.auth.reset_password_email(body.email.lower())
+    except Exception as error: raise HTTPException(400, "Unable to request password reset") from error
+    return {"data": {"message": "Password reset email requested"}}
 
 
 @router.post("/auth/password/change", tags=["auth"])
 def change_password(body: PasswordChange, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not verify_password(body.current_password, user.password_hash):
-        raise HTTPException(400, "Current password is incorrect")
-    user.password_hash = hash_password(body.new_password); db.commit()
+    admin = get_supabase_client()
+    if admin is None: raise HTTPException(503, "Supabase service role is not configured")
+    try: admin.auth.admin.update_user_by_id(user.id, {"password": body.new_password})
+    except Exception as error: raise HTTPException(400, "Password change failed") from error
     return {"data": {"message": "Password changed"}}
 
 
@@ -124,7 +153,7 @@ def invite_recruiter(body: MemberInvite, user: User = Depends(require_roles("COM
     if body.role not in {"RECRUITER", "COMPANY_ADMIN"}: raise HTTPException(400, "Invalid member role")
     invited = db.scalar(select(User).where(User.email == body.email.lower()))
     if not invited:
-        invited = User(email=body.email.lower(), full_name=body.full_name, role=body.role, password_hash=hash_password(uuid4().hex))
+        invited = User(email=body.email.lower(), full_name=body.full_name, role=body.role)
         db.add(invited); db.flush()
     member = CompanyMember(company_id=company.id, user_id=invited.id, role=body.role); db.add(member)
     try: db.commit()
