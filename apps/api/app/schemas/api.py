@@ -62,6 +62,16 @@ class JobUpdate(JobCreate):
     description: str | None = None
 
 
+class JobRequirementsUpdate(BaseModel):
+    required_skills: list[str] = []
+    preferred_skills: list[str] = []
+    minimum_experience: float | None = Field(default=None, ge=0)
+    education_requirements: list[str] = []
+    certifications: list[str] = []
+    seniority: str | None = None
+    responsibilities: list[str] = []
+
+
 class PipelineStageCreate(BaseModel):
     name: str
     stage_type: str
@@ -90,8 +100,16 @@ class ResumeCreate(BaseModel):
     mime_type: str
 
 
+class ResumeParseRequest(BaseModel):
+    text: str = Field(min_length=1)
+
+
 class StatusUpdate(BaseModel):
     status: str
+
+
+class NotificationReadUpdate(BaseModel):
+    is_read: bool = True
 
 
 class AssessmentCreate(BaseModel):
@@ -143,3 +161,17 @@ class CandidateRankingRequest(BaseModel):
 
 class InterviewAnalysisRequest(BaseModel):
     transcript: str
+
+
+class InterviewStart(BaseModel):
+    max_questions: int = Field(default=5, ge=1, le=20)
+
+
+class InterviewMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+
+
+class FeedbackCreate(BaseModel):
+    rating: int | None = Field(default=None, ge=1, le=5)
+    decision: str = "NONE"
+    comment: str | None = None

@@ -14,6 +14,18 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     redis_url: str = "redis://localhost:6379/0"
     jwt_expiry_minutes: int = 60
+    s3_bucket: str = ""
+    aws_region: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    s3_endpoint_url: str = ""
+    llm_provider: str = "gemini"
+    llm_api_key: str = ""
+    llm_model: str = "gemini-3.6-flash"
+    embedding_provider: str = "gemini"
+    embedding_api_key: str = ""
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimensions: int = 1536
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).resolve().parents[4] / ".env", Path(__file__).resolve().parents[2] / ".env"),

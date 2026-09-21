@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.api.v1.routes import router as v1_router
+from app.db.session import engine
 from app.models import domain  # noqa: F401
 
 settings = get_settings()

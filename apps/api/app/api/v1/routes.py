@@ -2,8 +2,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,16 +13,25 @@ from app.db.session import get_db
 from app.db.supabase import get_supabase_auth_client, get_supabase_client
 from app.models.domain import (Application, Assessment, AssessmentAttempt,
                                AssessmentQuestion, AssessmentResult, CandidateProfile,
-                               CandidateSubmission, Company, CompanyMember, HiringPipeline,
-                               Job, PipelineStage, QuestionBank, TestCase, User)
+                               AuditLog, CandidateRanking, CandidateScore, CandidateSubmission, Company, CompanyMember, EvaluationResult, HiringPipeline,
+                               InterviewMessage, InterviewSession, Job, JobRequirement, Notification, PipelineStage, QuestionBank, RecruiterFeedback, TestCase, User)
 from app.models.domain import Resume
 from app.schemas.api import (AuthLogin, AuthRefresh, AuthRegister, CompanyCreate, CompanyUpdate,
                              JobCreate, JobUpdate, MemberInvite, PasswordChange,
-                             PasswordResetRequest, PipelineCreate, ProfileUpdate, StatusUpdate)
+                             PasswordResetRequest, PipelineCreate, ProfileUpdate, StatusUpdate,
+                             NotificationReadUpdate, ResumeParseRequest, InterviewStart,
+                             InterviewMessageCreate, FeedbackCreate, JobRequirementsUpdate)
 from app.schemas.api import (AssessmentCreate, AttemptSubmit, CandidateRankingRequest,
                              InterviewAnalysisRequest, QuestionBankCreate,
                              QuestionCreate, ResumeAnalysisRequest, ResumeCreate)
 from app.services.ai import analyze_interview_transcript, analyze_resume_against_job, rank_candidates_for_job
+from app.services.notifications import (create_notification, mark_read, notification_payload,
+                                        notify_company)
+from app.services.intelligence import (audit, calculate_score, evaluate_interview,
+                                       interview_prompt, save_resume_parse)
+from app.services.requirements import analyze_job_description, eligibility_check
+from app.services.storage import create_download_url, upload_bytes
+from app.workers.tasks import parse_resume as parse_resume_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -158,6 +167,7 @@ def invite_recruiter(body: MemberInvite, user: User = Depends(require_roles("COM
         invited = User(email=body.email.lower(), full_name=body.full_name, role=body.role)
         db.add(invited); db.flush()
     member = CompanyMember(company_id=company.id, user_id=invited.id, role=body.role); db.add(member)
+    create_notification(db, invited.id, "RECRUITER_INVITED", "You were invited to a company", f"You were invited to join {company.name}.", {"company_id": company.id, "role": body.role})
     try: db.commit()
     except IntegrityError as error: db.rollback(); raise HTTPException(409, "User is already a member") from error
     return {"data": data(member)}
@@ -168,6 +178,85 @@ def remove_recruiter(user_id: str, user: User = Depends(require_roles("COMPANY_A
     member = db.scalar(select(CompanyMember).where(CompanyMember.company_id == company_for(db, user).id, CompanyMember.user_id == user_id))
     if not member: raise HTTPException(404, "Member not found")
     db.delete(member); db.commit(); return {"data": {"message": "Member removed"}}
+
+
+@router.get("/companies/me/members", tags=["companies"])
+def list_members(user: User = Depends(company_user), db: Session = Depends(get_db)):
+    company = company_for(db, user)
+    members = db.scalars(select(CompanyMember).where(CompanyMember.company_id == company.id)).all()
+    return {"data": [{**data(member), "user": user_data(db.get(User, member.user_id))} for member in members]}
+
+
+@router.patch("/companies/me/members/{user_id}", tags=["companies"])
+def update_member(user_id: str, body: MemberInvite, user: User = Depends(require_roles("COMPANY_ADMIN")), db: Session = Depends(get_db)):
+    if body.role not in {"RECRUITER", "COMPANY_ADMIN"}:
+        raise HTTPException(400, "Invalid member role")
+    member = db.scalar(select(CompanyMember).where(CompanyMember.company_id == company_for(db, user).id, CompanyMember.user_id == user_id))
+    if not member:
+        raise HTTPException(404, "Member not found")
+    member.role = body.role
+    target = db.get(User, user_id)
+    if target:
+        target.role = body.role
+    audit(db, company_for(db, user).id, user.id, "COMPANY_MEMBER", user_id, "UPDATED", new={"role": body.role})
+    db.commit()
+    return {"data": data(member)}
+
+
+@router.get("/notifications", tags=["notifications"])
+def list_notifications(unread_only: bool = False, limit: int = 50, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    limit = min(max(limit, 1), 100)
+    query = select(Notification).where(Notification.user_id == user.id)
+    if unread_only:
+        query = query.where(Notification.is_read.is_(False))
+    items = db.scalars(query.order_by(Notification.created_at.desc()).limit(limit)).all()
+    return {"data": [notification_payload(item) for item in items]}
+
+
+@router.get("/notifications/unread-count", tags=["notifications"])
+def unread_notification_count(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    count = db.scalar(select(func.count(Notification.id)).where(Notification.user_id == user.id, Notification.is_read.is_(False))) or 0
+    return {"data": {"count": count}}
+
+
+@router.patch("/notifications/{notification_id}", tags=["notifications"])
+def update_notification(notification_id: str, body: NotificationReadUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    notification = db.scalar(select(Notification).where(Notification.id == notification_id, Notification.user_id == user.id))
+    if not notification:
+        raise HTTPException(404, "Notification not found")
+    if body.is_read:
+        mark_read(notification)
+    else:
+        notification.is_read = False
+        notification.read_at = None
+    db.commit()
+    db.refresh(notification)
+    return {"data": notification_payload(notification)}
+
+
+@router.post("/notifications/read-all", tags=["notifications"])
+def mark_all_notifications_read(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    items = db.scalars(select(Notification).where(Notification.user_id == user.id, Notification.is_read.is_(False))).all()
+    for item in items:
+        mark_read(item)
+    db.commit()
+    return {"data": {"updated": len(items)}}
+
+
+@router.get("/public/jobs", tags=["public"])
+def public_jobs(db: Session = Depends(get_db)):
+    jobs = db.scalars(select(Job).where(Job.status == "PUBLISHED").order_by(Job.created_at.desc())).all()
+    return {"data": [{**data(job), "skills": json.loads(job.skills)} for job in jobs]}
+
+
+@router.get("/public/jobs/{job_id}", tags=["public"])
+def public_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.status == "PUBLISHED"))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    result = data(job)
+    result["skills"] = json.loads(job.skills)
+    return {"data": result}
 
 
 @router.post("/pipelines", status_code=201, tags=["pipelines"])
@@ -183,6 +272,31 @@ def create_pipeline(body: PipelineCreate, user: User = Depends(company_user), db
 def list_pipelines(user: User = Depends(company_user), db: Session = Depends(get_db)):
     company = company_for(db, user)
     return {"data": [data(item) for item in db.scalars(select(HiringPipeline).where(HiringPipeline.company_id == company.id)).all()]}
+
+
+@router.patch("/pipelines/{pipeline_id}", tags=["pipelines"])
+def update_pipeline(pipeline_id: str, body: PipelineCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    pipeline = db.scalar(select(HiringPipeline).where(HiringPipeline.id == pipeline_id, HiringPipeline.company_id == company_for(db, user).id))
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+    pipeline.name = body.name
+    db.query(PipelineStage).filter(PipelineStage.pipeline_id == pipeline.id).delete()
+    for stage in body.stages:
+        db.add(PipelineStage(pipeline_id=pipeline.id, **stage.model_dump()))
+    audit(db, pipeline.company_id, user.id, "PIPELINE", pipeline.id, "UPDATED", new={"name": body.name})
+    db.commit()
+    return {"data": data(pipeline)}
+
+
+@router.delete("/pipelines/{pipeline_id}", tags=["pipelines"])
+def delete_pipeline(pipeline_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    pipeline = db.scalar(select(HiringPipeline).where(HiringPipeline.id == pipeline_id, HiringPipeline.company_id == company_for(db, user).id))
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+    db.query(PipelineStage).filter(PipelineStage.pipeline_id == pipeline.id).delete()
+    db.delete(pipeline)
+    db.commit()
+    return {"data": {"message": "Pipeline deleted"}}
 
 
 @router.post("/jobs", status_code=201, tags=["jobs"])
@@ -236,6 +350,64 @@ def pause_job(job_id: str, user: User = Depends(company_user), db: Session = Dep
     job.status = "PAUSED"; db.commit(); db.refresh(job); return {"data": data(job)}
 
 
+@router.post("/jobs/{job_id}/analyze-jd", tags=["jobs"])
+def analyze_jd(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    result = analyze_job_description(job.title, job.description, json.loads(job.skills))
+    requirements = db.scalar(select(JobRequirement).where(JobRequirement.job_id == job.id))
+    if not requirements:
+        requirements = JobRequirement(job_id=job.id)
+        db.add(requirements)
+    for key in ("required_skills", "preferred_skills", "education_requirements", "certifications", "responsibilities"):
+        setattr(requirements, key, json.dumps(result[key]))
+    requirements.minimum_experience = result["minimum_experience"]
+    requirements.seniority = result["seniority"]
+    requirements.normalized_requirements = json.dumps(result)
+    requirements.ai_analysis_version = "deterministic-jd-v1"
+    audit(db, job.company_id, user.id, "JOB_REQUIREMENTS", job.id, "ANALYZED", new=result)
+    db.commit(); db.refresh(requirements)
+    return {"data": {"job_id": job.id, **result}}
+
+
+def requirement_payload(requirements: JobRequirement) -> dict:
+    result = data(requirements)
+    for key in ("required_skills", "preferred_skills", "education_requirements", "certifications", "responsibilities", "normalized_requirements"):
+        result[key] = json.loads(getattr(requirements, key))
+    return result
+
+
+@router.get("/jobs/{job_id}/requirements", tags=["jobs"])
+def get_requirements(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    requirements = db.scalar(select(JobRequirement).where(JobRequirement.job_id == job_id)) if job else None
+    if not job or not requirements:
+        raise HTTPException(404, "Job requirements not found")
+    return {"data": requirement_payload(requirements)}
+
+
+@router.patch("/jobs/{job_id}/requirements", tags=["jobs"])
+def update_requirements(job_id: str, body: JobRequirementsUpdate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    requirements = db.scalar(select(JobRequirement).where(JobRequirement.job_id == job.id))
+    if not requirements:
+        requirements = JobRequirement(job_id=job.id)
+        db.add(requirements)
+    values = body.model_dump()
+    for key in ("required_skills", "preferred_skills", "education_requirements", "certifications", "responsibilities"):
+        setattr(requirements, key, json.dumps(values[key]))
+    requirements.minimum_experience = values["minimum_experience"]
+    requirements.seniority = values["seniority"]
+    requirements.normalized_requirements = json.dumps(values)
+    requirements.ai_analysis_version = "recruiter-confirmed-v1"
+    audit(db, job.company_id, user.id, "JOB_REQUIREMENTS", job.id, "UPDATED", new=values)
+    db.commit(); db.refresh(requirements)
+    return {"data": requirement_payload(requirements)}
+
+
 @router.post("/candidates/profile", tags=["candidates"])
 def upsert_profile(body: ProfileUpdate, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
     profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
@@ -268,11 +440,89 @@ def add_resume(body: ResumeCreate, user: User = Depends(require_roles("CANDIDATE
     return {"data": data(resume)}
 
 
+@router.post("/candidates/resumes/upload", status_code=202, tags=["candidates"])
+def upload_resume(file: UploadFile = File(...), user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    allowed = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+    if file.content_type not in allowed:
+        raise HTTPException(400, "Only PDF and DOCX resumes are supported")
+    content = file.file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Resume must be 10 MB or smaller")
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    if not profile:
+        raise HTTPException(400, "Complete your candidate profile first")
+    storage_key = f"resumes/{user.id}/{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{file.filename}"
+    try:
+        upload_bytes(storage_key, content, file.content_type)
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+    resume = Resume(candidate_id=profile.id, file_name=file.filename or "resume", storage_key=storage_key, mime_type=file.content_type, parse_status="QUEUED")
+    db.add(resume); db.commit(); db.refresh(resume)
+    task = parse_resume_task.delay(resume.id)
+    resume.parse_task_id = task.id
+    db.commit(); db.refresh(resume)
+    return {"data": {**data(resume), "task_id": task.id}}
+
+
+@router.get("/candidates/resumes/{resume_id}/download-url", tags=["candidates"])
+def resume_download_url(resume_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    try:
+        url = create_download_url(resume.storage_key)
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+    return {"data": {"url": url, "expires_in": 600}}
+
+
 @router.get("/candidates/resumes", tags=["candidates"])
 def list_resumes(user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
     profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
     if not profile: return {"data": []}
     return {"data": [data(item) for item in db.scalars(select(Resume).where(Resume.candidate_id == profile.id)).all()]}
+
+
+@router.post("/candidates/resumes/{resume_id}/parse", status_code=202, tags=["candidates"])
+def parse_resume(resume_id: str, body: ResumeParseRequest, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    resume.parse_status = "QUEUED"
+    resume.parse_error = None
+    db.commit()
+    task = parse_resume_task.delay(resume.id, body.text)
+    resume.parse_task_id = task.id
+    db.commit()
+    return {"data": {**data(resume), "task_id": task.id}}
+
+
+@router.get("/candidates/resumes/{resume_id}/parse-status", tags=["candidates"])
+def resume_parse_status(resume_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    result = {"resume_id": resume.id, "status": resume.parse_status, "task_id": resume.parse_task_id, "error": resume.parse_error}
+    if resume.parse_status == "COMPLETED":
+        result["completed_at"] = resume.parse_completed_at
+    return {"data": result}
+
+
+@router.get("/candidates/resumes/{resume_id}/parsed-data", tags=["candidates"])
+def parsed_resume(resume_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    resume = db.get(Resume, resume_id)
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    if user.role == "CANDIDATE":
+        profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+        if not profile or resume.candidate_id != profile.id:
+            raise HTTPException(403, "Forbidden")
+    elif not db.scalar(select(Job).join(Application, Application.job_id == Job.id).where(Application.candidate_id == resume.candidate_id, Job.company_id == company_for(db, user).id)):
+        raise HTTPException(403, "Forbidden")
+    return {"data": {"parse_status": resume.parse_status, "parsed_text": resume.parsed_text, "structured_data": json.loads(resume.structured_data)}}
 
 
 @router.post("/jobs/{job_id}/apply", status_code=201, tags=["applications"])
@@ -281,7 +531,10 @@ def apply(job_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Ses
     if not job or job.status != "PUBLISHED": raise HTTPException(400, "Job is not published")
     if not profile: raise HTTPException(400, "Complete your candidate profile first")
     application = Application(job_id=job.id, candidate_id=profile.id); db.add(application)
-    try: db.commit()
+    try:
+        db.flush()
+        notify_company(db, job.company_id, "CANDIDATE_APPLIED", "New candidate application", f"A candidate applied for {job.title}.", {"application_id": application.id, "job_id": job.id})
+        db.commit()
     except IntegrityError as error: db.rollback(); raise HTTPException(409, "Already applied to this job") from error
     db.refresh(application); return {"data": data(application)}
 
@@ -308,6 +561,41 @@ def get_application(application_id: str, user: User = Depends(get_current_user),
     return {"data": data(application)}
 
 
+@router.get("/applications/{application_id}/timeline", tags=["applications"])
+def application_timeline(application_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(404, "Application not found")
+    if user.role == "CANDIDATE":
+        profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+        if not profile or profile.id != application.candidate_id:
+            raise HTTPException(403, "Forbidden")
+        company_id = None
+    else:
+        job = db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id))
+        if not job:
+            raise HTTPException(403, "Forbidden")
+        company_id = job.company_id
+    logs = select(AuditLog).where(AuditLog.entity_type == "APPLICATION", AuditLog.entity_id == application.id)
+    if company_id:
+        logs = logs.where(AuditLog.company_id == company_id)
+    return {"data": [data(item) for item in db.scalars(logs.order_by(AuditLog.created_at)).all()]}
+
+
+@router.get("/jobs/{job_id}/candidates", tags=["recruiter"])
+def job_candidates(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    applications = db.scalars(select(Application).where(Application.job_id == job.id)).all()
+    result = []
+    for application in applications:
+        profile = db.get(CandidateProfile, application.candidate_id)
+        score = db.scalar(select(CandidateScore).where(CandidateScore.application_id == application.id))
+        result.append({"application": data(application), "profile": data(profile) if profile else None, "score": data(score) if score else None})
+    return {"data": result}
+
+
 @router.patch("/applications/{application_id}/status", tags=["applications"])
 def update_application_status(application_id: str, body: StatusUpdate, user: User = Depends(company_user), db: Session = Depends(get_db)):
     transitions = {
@@ -329,7 +617,33 @@ def update_application_status(application_id: str, body: StatusUpdate, user: Use
         raise HTTPException(404, "Application not found")
     if body.status not in transitions.get(application.status, set()):
         raise HTTPException(409, f"Cannot move application from {application.status} to {body.status}")
-    application.status = body.status; db.commit(); db.refresh(application); return {"data": data(application)}
+    previous_status = application.status
+    application.status = body.status
+    candidate = db.scalar(select(CandidateProfile).where(CandidateProfile.id == application.candidate_id))
+    if candidate:
+        create_notification(db, candidate.user_id, "APPLICATION_STATUS_CHANGED", "Application status updated", f"Your application for {application.job_id} moved to {body.status}.", {"application_id": application.id, "previous_status": previous_status, "status": body.status})
+    job = db.get(Job, application.job_id)
+    audit(db, job.company_id if job else None, user.id, "APPLICATION", application.id, "STATUS_CHANGED", old={"status": previous_status}, new={"status": body.status})
+    db.commit(); db.refresh(application); return {"data": data(application)}
+
+
+def set_decision(application_id: str, status_value: str, user: User, db: Session):
+    return update_application_status(application_id, StatusUpdate(status=status_value), user, db)
+
+
+@router.post("/applications/{application_id}/shortlist", tags=["applications"])
+def shortlist_application(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    return set_decision(application_id, "SHORTLISTED", user, db)
+
+
+@router.post("/applications/{application_id}/reject", tags=["applications"])
+def reject_application(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    return set_decision(application_id, "REJECTED", user, db)
+
+
+@router.post("/applications/{application_id}/hold", tags=["applications"])
+def hold_application(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    return set_decision(application_id, "ON_HOLD", user, db)
 
 
 def assessment_for_company(assessment_id: str, user: User, db: Session) -> Assessment:
@@ -379,6 +693,25 @@ def list_assessments(user: User = Depends(company_user), db: Session = Depends(g
 @router.get("/assessments/{assessment_id}", tags=["assessments"])
 def get_assessment(assessment_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
     return {"data": assessment_payload(assessment_for_company(assessment_id, user, db), db, include_answers=True)}
+
+
+@router.patch("/assessments/{assessment_id}", tags=["assessments"])
+def update_assessment(assessment_id: str, body: AssessmentCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    assessment = assessment_for_company(assessment_id, user, db)
+    if body.job_id != assessment.job_id:
+        raise HTTPException(400, "Assessment job cannot be changed")
+    for key, value in body.model_dump(exclude={"job_id", "rules"}).items():
+        setattr(assessment, key, value)
+    assessment.rules = json.dumps(body.rules)
+    db.commit(); db.refresh(assessment)
+    return {"data": assessment_payload(assessment, db, include_answers=True)}
+
+
+@router.delete("/assessments/{assessment_id}", tags=["assessments"])
+def delete_assessment(assessment_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    assessment = assessment_for_company(assessment_id, user, db)
+    db.delete(assessment); db.commit()
+    return {"data": {"message": "Assessment deleted"}}
 
 
 @router.post("/question-banks", status_code=201, tags=["assessments"])
@@ -489,6 +822,12 @@ def submit_attempt(attempt_id: str, body: AttemptSubmit, user: User = Depends(re
         else:
             target.status = "PENDING_REVIEW"; target.feedback = "Subjective response requires review"
     db.flush(); result = finalize_attempt(attempt, assessment, db)
+    application = db.get(Application, attempt.application_id)
+    if application:
+        candidate = db.scalar(select(CandidateProfile).where(CandidateProfile.id == application.candidate_id))
+        if candidate:
+            create_notification(db, candidate.user_id, "ASSESSMENT_COMPLETED", "Assessment completed", f"Your assessment result is {result.score}%.", {"attempt_id": attempt.id, "assessment_id": assessment.id, "score": result.score, "passed": result.passed})
+            db.commit()
     return {"data": {"attempt": data(attempt), "result": data(result) | {"breakdown": json.loads(result.breakdown)}}}
 
 
@@ -506,6 +845,180 @@ def get_attempt_result(attempt_id: str, user: User = Depends(get_current_user), 
         raise HTTPException(404, "Assessment result not available")
     payload = data(result); payload["breakdown"] = json.loads(result.breakdown)
     return {"data": payload}
+
+
+def interview_for_user(interview_id: str, user: User, db: Session) -> tuple[InterviewSession, Application]:
+    session = db.get(InterviewSession, interview_id)
+    if not session:
+        raise HTTPException(404, "Interview not found")
+    application = db.get(Application, session.application_id)
+    if not application:
+        raise HTTPException(404, "Application not found")
+    if user.role == "CANDIDATE":
+        profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+        if not profile or application.candidate_id != profile.id:
+            raise HTTPException(403, "Forbidden")
+    elif not db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id)):
+        raise HTTPException(403, "Forbidden")
+    return session, application
+
+
+@router.post("/applications/{application_id}/interview/start", status_code=201, tags=["interviews"])
+def start_interview(application_id: str, body: InterviewStart, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    application = db.scalar(select(Application).where(Application.id == application_id, Application.candidate_id == (profile.id if profile else "")))
+    if not application:
+        raise HTTPException(404, "Application not found")
+    existing = db.scalar(select(InterviewSession).where(InterviewSession.application_id == application.id, InterviewSession.status == "IN_PROGRESS"))
+    if existing:
+        session = existing
+    else:
+        session = InterviewSession(application_id=application.id, max_questions=body.max_questions)
+        db.add(session); db.flush()
+        db.add(InterviewMessage(session_id=session.id, role="AI", content=interview_prompt(session, []), sequence_number=0))
+    db.commit(); db.refresh(session)
+    messages = db.scalars(select(InterviewMessage).where(InterviewMessage.session_id == session.id).order_by(InterviewMessage.sequence_number)).all()
+    return {"data": {"interview": data(session), "messages": [data(item) for item in messages]}}
+
+
+@router.get("/interviews/{interview_id}", tags=["interviews"])
+def get_interview(interview_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session, _ = interview_for_user(interview_id, user, db)
+    messages = db.scalars(select(InterviewMessage).where(InterviewMessage.session_id == session.id).order_by(InterviewMessage.sequence_number)).all()
+    return {"data": {"interview": data(session), "messages": [data(item) for item in messages]}}
+
+
+@router.post("/interviews/{interview_id}/messages", tags=["interviews"])
+def add_interview_message(interview_id: str, body: InterviewMessageCreate, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    session, _ = interview_for_user(interview_id, user, db)
+    if session.status != "IN_PROGRESS":
+        raise HTTPException(409, "Interview is no longer active")
+    messages = db.scalars(select(InterviewMessage).where(InterviewMessage.session_id == session.id).order_by(InterviewMessage.sequence_number)).all()
+    db.add(InterviewMessage(session_id=session.id, role="CANDIDATE", content=body.content, sequence_number=len(messages)))
+    session.current_question_index += 1
+    if session.current_question_index >= session.max_questions:
+        session.status = "COMPLETED"
+        session.completed_at = datetime.now(timezone.utc)
+        evaluate_interview(db, session)
+        response = None
+    else:
+        response = interview_prompt(session, messages)
+        db.add(InterviewMessage(session_id=session.id, role="AI", content=response, sequence_number=len(messages) + 1))
+    db.commit()
+    return {"data": {"interview": data(session), "next_question": response}}
+
+
+@router.post("/interviews/{interview_id}/complete", tags=["interviews"])
+def complete_interview(interview_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    session, _ = interview_for_user(interview_id, user, db)
+    if session.status == "IN_PROGRESS":
+        session.status = "COMPLETED"; session.completed_at = datetime.now(timezone.utc); result = evaluate_interview(db, session)
+    else:
+        result = {"overall_score": session.overall_score, "confidence": session.confidence}
+    db.commit()
+    return {"data": {"interview": data(session), "result": result}}
+
+
+@router.post("/applications/{application_id}/score/recalculate", tags=["ranking"])
+def recalculate_score(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(404, "Application not found")
+    job = db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Application not found")
+    score = calculate_score(db, application, job); db.commit(); db.refresh(score)
+    return {"data": data(score) | {"score_breakdown": json.loads(score.score_breakdown)}}
+
+
+@router.post("/jobs/{job_id}/rankings/recalculate", tags=["ranking"])
+def recalculate_rankings(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    applications = db.scalars(select(Application).where(Application.job_id == job.id)).all()
+    scores = []
+    for application in applications:
+        scores.append(calculate_score(db, application, job))
+    db.flush()
+    for old in db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id)).all():
+        db.delete(old)
+    ordered = sorted(scores, key=lambda item: (-item.final_score, -item.confidence, item.application_id))
+    for index, score in enumerate(ordered, start=1):
+        db.add(CandidateRanking(job_id=job.id, application_id=score.application_id, rank=index, final_score=score.final_score, confidence=score.confidence))
+    db.commit()
+    return {"data": [{"rank": index, "application_id": score.application_id, "final_score": score.final_score, "confidence": score.confidence} for index, score in enumerate(ordered, start=1)]}
+
+
+@router.get("/jobs/{job_id}/rankings", tags=["ranking"])
+def list_rankings(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return {"data": [data(item) for item in db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id).order_by(CandidateRanking.rank)).all()]}
+
+
+@router.get("/jobs/{job_id}/compare", tags=["ranking"])
+def compare_candidates(job_id: str, application_ids: str = Query(...), user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    ids = [item.strip() for item in application_ids.split(",") if item.strip()]
+    if not ids or len(ids) > 10:
+        raise HTTPException(422, "Provide between 1 and 10 application IDs")
+    applications = db.scalars(select(Application).where(Application.job_id == job.id, Application.id.in_(ids))).all()
+    if len(applications) != len(set(ids)):
+        raise HTTPException(404, "One or more applications were not found")
+    result = []
+    for application in applications:
+        profile = db.get(CandidateProfile, application.candidate_id)
+        score = db.scalar(select(CandidateScore).where(CandidateScore.application_id == application.id))
+        result.append({"application": data(application), "candidate": data(profile) if profile else None, "score": data(score) if score else None})
+    return {"data": result}
+
+
+@router.post("/applications/{application_id}/eligibility", tags=["screening"])
+def check_eligibility(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(404, "Application not found")
+    job = db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id))
+    requirements = db.scalar(select(JobRequirement).where(JobRequirement.job_id == application.job_id)) if job else None
+    if not job or not requirements:
+        raise HTTPException(404, "Application requirements not found")
+    resume = db.scalar(select(Resume).where(Resume.candidate_id == application.candidate_id).order_by(Resume.created_at.desc()))
+    profile = db.get(CandidateProfile, application.candidate_id)
+    if not resume or not resume.parsed_text:
+        raise HTTPException(409, "Candidate resume must be parsed before eligibility can be checked")
+    requirements_data = requirement_payload(requirements)
+    result = eligibility_check(requirements_data, resume.parsed_text, {"experience": json.loads(profile.experience) if profile else []})
+    audit(db, job.company_id, user.id, "APPLICATION", application.id, "ELIGIBILITY_CHECKED", new=result)
+    if not result["eligible"]:
+        application.status = "REJECTED"
+    db.commit()
+    return {"data": result}
+
+
+@router.post("/applications/{application_id}/feedback", status_code=201, tags=["recruiter"])
+def add_feedback(application_id: str, body: FeedbackCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    application = db.get(Application, application_id)
+    if not application or not db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id)):
+        raise HTTPException(404, "Application not found")
+    if body.decision not in {"NONE", "ADVANCE", "SHORTLIST", "REJECT", "ON_HOLD"}:
+        raise HTTPException(400, "Invalid feedback decision")
+    feedback = RecruiterFeedback(application_id=application.id, user_id=user.id, rating=body.rating, decision=body.decision, comment=body.comment)
+    db.add(feedback)
+    audit(db, company_for(db, user).id, user.id, "APPLICATION", application.id, "FEEDBACK_ADDED", new={"decision": body.decision})
+    db.commit(); db.refresh(feedback)
+    return {"data": data(feedback)}
+
+
+@router.get("/applications/{application_id}/evaluations", tags=["recruiter"])
+def list_evaluations(application_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    application = db.get(Application, application_id)
+    if not application or not db.scalar(select(Job).where(Job.id == application.job_id, Job.company_id == company_for(db, user).id)):
+        raise HTTPException(404, "Application not found")
+    return {"data": [data(item) | {"dimensions": json.loads(item.dimensions), "evidence": json.loads(item.evidence)} for item in db.scalars(select(EvaluationResult).where(EvaluationResult.application_id == application.id)).all()]}
 
 
 @router.post("/ai/resume-fit", tags=["ai"])
