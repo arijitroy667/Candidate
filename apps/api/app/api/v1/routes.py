@@ -19,8 +19,10 @@ from app.models.domain import Resume
 from app.schemas.api import (AuthLogin, AuthRefresh, AuthRegister, CompanyCreate, CompanyUpdate,
                              JobCreate, JobUpdate, MemberInvite, PasswordChange,
                              PasswordResetRequest, PipelineCreate, ProfileUpdate, StatusUpdate)
-from app.schemas.api import (AssessmentCreate, AttemptSubmit, QuestionBankCreate,
-                             QuestionCreate, ResumeCreate)
+from app.schemas.api import (AssessmentCreate, AttemptSubmit, CandidateRankingRequest,
+                             InterviewAnalysisRequest, QuestionBankCreate,
+                             QuestionCreate, ResumeAnalysisRequest, ResumeCreate)
+from app.services.ai import analyze_interview_transcript, analyze_resume_against_job, rank_candidates_for_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -504,3 +506,32 @@ def get_attempt_result(attempt_id: str, user: User = Depends(get_current_user), 
         raise HTTPException(404, "Assessment result not available")
     payload = data(result); payload["breakdown"] = json.loads(result.breakdown)
     return {"data": payload}
+
+
+@router.post("/ai/resume-fit", tags=["ai"])
+def ai_resume_fit(body: ResumeAnalysisRequest, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    """Generate a transparent resume-to-job fit score for recruiter review."""
+    if not body.job or not isinstance(body.job, dict):
+        raise HTTPException(400, "A valid job payload is required")
+    if not body.resume_text or not body.resume_text.strip():
+        raise HTTPException(400, "Resume text is required")
+    result = analyze_resume_against_job(body.job, body.resume_text)
+    return {"data": result}
+
+
+@router.post("/ai/rank-candidates", tags=["ai"])
+def ai_rank_candidates(body: CandidateRankingRequest, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    """Rank candidates with a deterministic score and evidence summary."""
+    if not body.job or not isinstance(body.job, dict):
+        raise HTTPException(400, "A valid job payload is required")
+    ranked = rank_candidates_for_job(body.job, body.candidates or [])
+    return {"data": {"job": body.job, "ranked_candidates": ranked}}
+
+
+@router.post("/ai/interview-analysis", tags=["ai"])
+def ai_interview_analysis(body: InterviewAnalysisRequest, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    """Score a transcript on technical depth, problem solving, and communication."""
+    if not body.transcript or not body.transcript.strip():
+        raise HTTPException(400, "Transcript text is required")
+    result = analyze_interview_transcript(body.transcript)
+    return {"data": result}

@@ -129,3 +129,17 @@ class SubmissionCreate(BaseModel):
 
 class AttemptSubmit(BaseModel):
     submissions: list[SubmissionCreate] = []
+
+
+class ResumeAnalysisRequest(BaseModel):
+    job: dict[str, Any]
+    resume_text: str
+
+
+class CandidateRankingRequest(BaseModel):
+    job: dict[str, Any]
+    candidates: list[dict[str, Any]] = []
+
+
+class InterviewAnalysisRequest(BaseModel):
+    transcript: str
