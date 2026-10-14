@@ -1,6 +1,7 @@
 """Add resume intelligence, interviews, evaluations, rankings, feedback, and audit logs."""
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision = "0007_intelligence_workflows"
 down_revision = "0006_notifications"
