@@ -1,6 +1,7 @@
 """Add structured job requirements."""
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision = "0008_requirements"
 down_revision = "0007_intelligence_workflows"
@@ -9,6 +10,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "job_requirements" in inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "job_requirements",
         sa.Column("id", sa.String(36), primary_key=True),

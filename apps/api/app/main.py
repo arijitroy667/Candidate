@@ -1,6 +1,5 @@
 import logging
 
-from fastapi import APIRouter, FastAPI, Request
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

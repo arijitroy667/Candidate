@@ -59,8 +59,6 @@ def analyze_resume_against_job(job: dict[str, Any], resume_text: str) -> dict[st
     title = str(job.get("title") or "")
     description = str(job.get("description") or "")
     resume = resume_text or ""
-    normalized_resume = _normalize(resume)
-
     matching_skills: list[str] = []
     missing_skills: list[str] = []
     evidence: list[str] = []

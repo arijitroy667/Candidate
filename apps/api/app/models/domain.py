@@ -3,8 +3,6 @@ from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
-from pgvector.sqlalchemy import Vector
-
 from app.db.session import Base
 
 
@@ -78,8 +76,6 @@ class Resume(Base):
     parsed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     structured_data: Mapped[str] = mapped_column(Text, default="{}")
     parser_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-    parse_task_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     parse_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -119,7 +115,6 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
     application_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pipeline_id: Mapped[str | None] = mapped_column(ForeignKey("hiring_pipelines.id"), nullable=True)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     scoring_config: Mapped[str] = mapped_column(Text, default='{"resume": 0.3, "assessment": 0.25, "interview": 0.2, "communication": 0.15, "experience": 0.1}')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

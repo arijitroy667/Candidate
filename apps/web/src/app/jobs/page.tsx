@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { api, type Job } from "../../lib/api";
 
 export default function JobsPage() {
@@ -22,11 +23,12 @@ export default function JobsPage() {
           {jobs.map((job) => (
             <article key={job.id} className="rounded-xl border border-[#dfe6de] bg-white p-6">
               <p className="text-xs font-semibold uppercase tracking-wider text-[#287067]">{job.location || "Remote"}</p>
-              <h2 className="mt-2 text-xl font-semibold">{job.title}</h2>
+              <Link href={`/jobs/${job.id}`} className="mt-2 block text-xl font-semibold hover:text-[#287067]">{job.title}</Link>
               <p className="mt-3 line-clamp-3 text-sm leading-6 text-[#6c7973]">{job.description}</p>
               <div className="mt-5 flex flex-wrap gap-2">
                 {job.skills.map((skill) => <span key={skill} className="rounded-full bg-[#e7f0e6] px-3 py-1 text-xs text-[#287067]">{skill}</span>)}
               </div>
+              <Link href={`/jobs/${job.id}`} className="mt-5 inline-block text-sm font-medium text-[#287067]">View role →</Link>
             </article>
           ))}
           {!error && jobs.length === 0 && <p className="text-sm text-[#6c7973]">No published roles yet.</p>}

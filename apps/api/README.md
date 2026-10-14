@@ -1,6 +1,6 @@
 # Candidex API
 
-FastAPI REST API for Candidex. Supabase owns authentication and PostgreSQL; this service validates Supabase JWTs and contains the domain/application layers.
+FastAPI REST API for the Candidex MVP. Supabase owns authentication, PostgreSQL, and private resume storage; this service validates Supabase access tokens and contains the domain/application layers.
 
 ## Required storage and authentication
 
@@ -8,11 +8,11 @@ This API has no local database fallback. Set every variable in `apps/api/.env.ex
 
 - `DATABASE_URL` must be the Supabase PostgreSQL connection string.
 - `SUPABASE_URL` and `SUPABASE_ANON_KEY` are used for user sign-up, login, and verification email flows.
-- `SUPABASE_SERVICE_ROLE_KEY` is used only for privileged server-side operations such as password administration.
-- `SUPABASE_JWT_SECRET` validates bearer tokens issued by Supabase Auth.
-- Run `alembic upgrade head` against the Supabase database. The migration enables the `vector` extension and creates 1536-dimension embedding columns for jobs and resumes.
+- `SUPABASE_SERVICE_ROLE_KEY` is used only for server-side Storage operations.
+- `SUPABASE_JWT_SECRET` is optional when the API validates tokens through Supabase Auth.
+- Run `alembic upgrade head` against the Supabase database.
 
-Resume binaries should be stored in a private Supabase Storage bucket; PostgreSQL stores resume metadata and pgvector stores embeddings.
+Create a private Supabase Storage bucket named `resumes`. Resume uploads are stored there and parsed synchronously by the API; PostgreSQL stores metadata and structured extracted data.
 
 ## Local development
 
@@ -36,10 +36,8 @@ Run `alembic upgrade head` to create the durable in-app notification store. Auth
 
 The API records notifications for recruiter invitations, candidate applications, application status changes, and completed assessments. Each record includes an event type and JSON payload so email and SMS providers can consume the same event contract when configured.
 
-The intelligence workflow also exposes public job discovery, resume parsing from extracted text, text interviews, recruiter evaluations, score recalculation, rankings, feedback, application timelines, and audit records. Run the `0007_intelligence_workflows` migration before using those endpoints. Celery task entry points are available in `app.workers.tasks`; start a worker with `celery -A app.workers.celery_app.celery_app worker --loglevel=INFO` after Redis is available.
+The intelligence workflow exposes public job discovery, synchronous resume parsing, text interviews, recruiter evaluations, score recalculation, rankings, feedback, application timelines, and audit records. Run the migrations before using those endpoints.
 
 ### Asynchronous resume parsing
 
-Run `alembic upgrade head` to apply `0009_async_resume_parsing`. `POST /api/v1/candidates/resumes/upload` stores the binary in private S3-compatible storage and returns `202` with a Celery `task_id`. The worker downloads the file, extracts PDF/DOCX text, calls LangChain `ChatGoogleGenerativeAI` with the configured `LLM_MODEL` (default `gemini-3.6-flash`), generates a Gemini embedding, normalizes it to 1536 dimensions, and stores it in the `resumes.embedding` pgvector column. Poll `GET /api/v1/candidates/resumes/{resume_id}/parse-status` and retrieve structured data from `GET /api/v1/candidates/resumes/{resume_id}/parsed-data`.
-
-Required runtime services are Redis, Supabase PostgreSQL with pgvector, and S3-compatible storage. Set `LLM_API_KEY` and `EMBEDDING_API_KEY`; the configured Gemini model name must be available to the Google Generative AI account.
+`POST /api/v1/candidates/resumes/upload` stores a PDF/DOCX file in Supabase Storage and parses it during the request. `GET /api/v1/candidates/resumes/{resume_id}/parse-status` and `GET /api/v1/candidates/resumes/{resume_id}/parsed-data` expose the result. The MVP uses deterministic, explainable extraction and matching; an external LLM can be added later as a synchronous optional provider.

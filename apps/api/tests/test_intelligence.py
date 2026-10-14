@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 from app.services.intelligence import interview_prompt, parse_resume_text

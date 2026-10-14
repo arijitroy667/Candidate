@@ -10,7 +10,6 @@ from app.models.domain import (
     Application,
     AssessmentAttempt,
     AssessmentResult,
-    CandidateProfile,
     CandidateScore,
     EvaluationResult,
     InterviewMessage,

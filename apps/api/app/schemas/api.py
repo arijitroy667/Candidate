@@ -72,6 +72,14 @@ class JobRequirementsUpdate(BaseModel):
     responsibilities: list[str] = []
 
 
+class ScoringConfigUpdate(BaseModel):
+    resume: float = Field(ge=0, le=1)
+    assessment: float = Field(ge=0, le=1)
+    interview: float = Field(ge=0, le=1)
+    communication: float = Field(ge=0, le=1)
+    experience: float = Field(ge=0, le=1)
+
+
 class PipelineStageCreate(BaseModel):
     name: str
     stage_type: str

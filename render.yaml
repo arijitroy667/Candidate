@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: candidex-api
+    runtime: python
+    buildCommand: pip install -r apps/api/requirements.txt
+    startCommand: cd apps/api && alembic upgrade head && cd ../.. && uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir apps/api
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: API_CORS_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: resumes

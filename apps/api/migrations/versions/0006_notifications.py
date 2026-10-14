@@ -1,6 +1,7 @@
 """Add durable in-app notifications."""
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 revision = "0006_notifications"
@@ -10,6 +11,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "notifications" in inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "notifications",
         sa.Column("id", sa.String(36), primary_key=True),

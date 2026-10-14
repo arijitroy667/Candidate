@@ -1,6 +1,8 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import PurePath
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import func, select
@@ -8,7 +10,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user, require_roles
-from app.core.config import get_settings
 from app.db.session import get_db
 from app.db.supabase import get_supabase_auth_client, get_supabase_client
 from app.models.domain import (Application, Assessment, AssessmentAttempt,
@@ -20,18 +21,18 @@ from app.schemas.api import (AuthLogin, AuthRefresh, AuthRegister, CompanyCreate
                              JobCreate, JobUpdate, MemberInvite, PasswordChange,
                              PasswordResetRequest, PipelineCreate, ProfileUpdate, StatusUpdate,
                              NotificationReadUpdate, ResumeParseRequest, InterviewStart,
-                             InterviewMessageCreate, FeedbackCreate, JobRequirementsUpdate)
+                             InterviewMessageCreate, FeedbackCreate, JobRequirementsUpdate,
+                             ScoringConfigUpdate)
 from app.schemas.api import (AssessmentCreate, AttemptSubmit, CandidateRankingRequest,
                              InterviewAnalysisRequest, QuestionBankCreate,
                              QuestionCreate, ResumeAnalysisRequest, ResumeCreate)
 from app.services.ai import analyze_interview_transcript, analyze_resume_against_job, rank_candidates_for_job
 from app.services.notifications import (create_notification, mark_read, notification_payload,
                                         notify_company)
-from app.services.intelligence import (audit, calculate_score, evaluate_interview,
-                                       interview_prompt, save_resume_parse)
+from app.services.intelligence import audit, calculate_score, evaluate_interview, interview_prompt
 from app.services.requirements import analyze_job_description, eligibility_check
+from app.services.resume_pipeline import extract_structured_resume, extract_text
 from app.services.storage import create_download_url, upload_bytes
-from app.workers.tasks import parse_resume as parse_resume_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,6 +41,36 @@ company_user = require_roles("COMPANY_ADMIN", "RECRUITER")
 
 def data(item):
     return {column.name: getattr(item, column.name) for column in item.__table__.columns}
+
+
+def job_data(job: Job) -> dict:
+    result = data(job)
+    result["skills"] = json.loads(job.skills)
+    result["scoring_config"] = json.loads(job.scoring_config)
+    return result
+
+
+def parse_resume_synchronously(db: Session, resume: Resume, content: bytes, *, text: str | None = None) -> None:
+    """Parse one resume inside the request for the deliberately small MVP."""
+    resume.parse_status = "PROCESSING"
+    resume.parse_started_at = datetime.now(timezone.utc)
+    resume.parse_error = None
+    db.flush()
+    try:
+        parsed_text = text.strip() if text is not None else extract_text(content, resume.mime_type)
+        if not parsed_text:
+            raise ValueError("Resume did not contain extractable text")
+        structured = extract_structured_resume(parsed_text)
+        resume.parsed_text = parsed_text
+        resume.structured_data = structured.model_dump_json()
+        resume.parser_version = "deterministic-mvp-v1"
+        resume.parse_status = "COMPLETED"
+        resume.parse_completed_at = datetime.now(timezone.utc)
+    except Exception as error:
+        resume.parse_status = "FAILED"
+        resume.parse_error = str(error)[:2000]
+        resume.parse_completed_at = datetime.now(timezone.utc)
+        raise
 
 
 def user_data(user: User) -> dict:
@@ -302,20 +333,20 @@ def delete_pipeline(pipeline_id: str, user: User = Depends(company_user), db: Se
 @router.post("/jobs", status_code=201, tags=["jobs"])
 def create_job(body: JobCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
     job = Job(company_id=company_for(db, user).id, created_by=user.id, skills=json.dumps(body.skills), **body.model_dump(exclude={"skills"}))
-    db.add(job); db.commit(); db.refresh(job); return {"data": data(job)}
+    db.add(job); db.commit(); db.refresh(job); return {"data": job_data(job)}
 
 
 @router.get("/jobs", tags=["jobs"])
 def list_jobs(user: User = Depends(company_user), db: Session = Depends(get_db)):
     company = company_for(db, user)
-    return {"data": [data(item) for item in db.scalars(select(Job).where(Job.company_id == company.id)).all()]}
+    return {"data": [job_data(item) for item in db.scalars(select(Job).where(Job.company_id == company.id)).all()]}
 
 
 @router.get("/jobs/{job_id}", tags=["jobs"])
 def get_job(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
     job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
     if not job: raise HTTPException(404, "Job not found")
-    result = data(job); result["skills"] = json.loads(job.skills); return {"data": result}
+    return {"data": job_data(job)}
 
 
 @router.patch("/jobs/{job_id}", tags=["jobs"])
@@ -325,7 +356,7 @@ def update_job(job_id: str, body: JobUpdate, user: User = Depends(company_user),
     values = body.model_dump(exclude_unset=True)
     if "skills" in values: values["skills"] = json.dumps(values["skills"])
     for key, value in values.items(): setattr(job, key, value)
-    db.commit(); db.refresh(job); return {"data": data(job)}
+    db.commit(); db.refresh(job); return {"data": job_data(job)}
 
 
 @router.delete("/jobs/{job_id}", tags=["jobs"])
@@ -340,14 +371,28 @@ def publish_job(job_id: str, user: User = Depends(company_user), db: Session = D
     job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
     if not job: raise HTTPException(404, "Job not found")
     if not job.title.strip() or not job.description.strip(): raise HTTPException(400, "Job title and description are required")
-    job.status = "PUBLISHED"; db.commit(); db.refresh(job); return {"data": data(job)}
+    job.status = "PUBLISHED"; db.commit(); db.refresh(job); return {"data": job_data(job)}
 
 
 @router.post("/jobs/{job_id}/pause", tags=["jobs"])
 def pause_job(job_id: str, user: User = Depends(company_user), db: Session = Depends(get_db)):
     job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
     if not job: raise HTTPException(404, "Job not found")
-    job.status = "PAUSED"; db.commit(); db.refresh(job); return {"data": data(job)}
+    job.status = "PAUSED"; db.commit(); db.refresh(job); return {"data": job_data(job)}
+
+
+@router.patch("/jobs/{job_id}/scoring", tags=["jobs"])
+def update_scoring(job_id: str, body: ScoringConfigUpdate, user: User = Depends(company_user), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    config = body.model_dump()
+    if round(sum(config.values()), 6) != 1.0:
+        raise HTTPException(422, "Scoring weights must sum to 1.0")
+    job.scoring_config = json.dumps(config)
+    audit(db, job.company_id, user.id, "JOB", job.id, "SCORING_UPDATED", new=config)
+    db.commit(); db.refresh(job)
+    return {"data": job_data(job)}
 
 
 @router.post("/jobs/{job_id}/analyze-jd", tags=["jobs"])
@@ -440,7 +485,7 @@ def add_resume(body: ResumeCreate, user: User = Depends(require_roles("CANDIDATE
     return {"data": data(resume)}
 
 
-@router.post("/candidates/resumes/upload", status_code=202, tags=["candidates"])
+@router.post("/candidates/resumes/upload", status_code=201, tags=["candidates"])
 def upload_resume(file: UploadFile = File(...), user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
     allowed = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
     if file.content_type not in allowed:
@@ -451,17 +496,23 @@ def upload_resume(file: UploadFile = File(...), user: User = Depends(require_rol
     profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
     if not profile:
         raise HTTPException(400, "Complete your candidate profile first")
-    storage_key = f"resumes/{user.id}/{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{file.filename}"
+    safe_name = PurePath(file.filename or "resume").name
+    storage_key = f"resumes/{user.id}/{uuid4()}-{safe_name}"
     try:
         upload_bytes(storage_key, content, file.content_type)
     except RuntimeError as error:
         raise HTTPException(503, str(error)) from error
-    resume = Resume(candidate_id=profile.id, file_name=file.filename or "resume", storage_key=storage_key, mime_type=file.content_type, parse_status="QUEUED")
+    except Exception as error:
+        raise HTTPException(503, "Resume storage is unavailable; verify the Supabase resumes bucket and service-role key") from error
+    resume = Resume(candidate_id=profile.id, file_name=safe_name, storage_key=storage_key, mime_type=file.content_type, parse_status="UPLOADED")
     db.add(resume); db.commit(); db.refresh(resume)
-    task = parse_resume_task.delay(resume.id)
-    resume.parse_task_id = task.id
-    db.commit(); db.refresh(resume)
-    return {"data": {**data(resume), "task_id": task.id}}
+    try:
+        parse_resume_synchronously(db, resume, content)
+        db.commit(); db.refresh(resume)
+    except Exception as error:
+        db.commit()
+        raise HTTPException(422, f"Resume could not be parsed: {error}") from error
+    return {"data": data(resume)}
 
 
 @router.get("/candidates/resumes/{resume_id}/download-url", tags=["candidates"])
@@ -474,6 +525,8 @@ def resume_download_url(resume_id: str, user: User = Depends(require_roles("CAND
         url = create_download_url(resume.storage_key)
     except RuntimeError as error:
         raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        raise HTTPException(503, "Resume storage is unavailable; verify the Supabase resumes bucket and service-role key") from error
     return {"data": {"url": url, "expires_in": 600}}
 
 
@@ -484,19 +537,19 @@ def list_resumes(user: User = Depends(require_roles("CANDIDATE")), db: Session =
     return {"data": [data(item) for item in db.scalars(select(Resume).where(Resume.candidate_id == profile.id)).all()]}
 
 
-@router.post("/candidates/resumes/{resume_id}/parse", status_code=202, tags=["candidates"])
+@router.post("/candidates/resumes/{resume_id}/parse", status_code=200, tags=["candidates"])
 def parse_resume(resume_id: str, body: ResumeParseRequest, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
     profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
     resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
     if not resume:
         raise HTTPException(404, "Resume not found")
-    resume.parse_status = "QUEUED"
-    resume.parse_error = None
-    db.commit()
-    task = parse_resume_task.delay(resume.id, body.text)
-    resume.parse_task_id = task.id
-    db.commit()
-    return {"data": {**data(resume), "task_id": task.id}}
+    try:
+        parse_resume_synchronously(db, resume, b"", text=body.text)
+        db.commit(); db.refresh(resume)
+    except Exception as error:
+        db.commit()
+        raise HTTPException(422, f"Resume could not be parsed: {error}") from error
+    return {"data": data(resume)}
 
 
 @router.get("/candidates/resumes/{resume_id}/parse-status", tags=["candidates"])
@@ -505,7 +558,7 @@ def resume_parse_status(resume_id: str, user: User = Depends(require_roles("CAND
     resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
     if not resume:
         raise HTTPException(404, "Resume not found")
-    result = {"resume_id": resume.id, "status": resume.parse_status, "task_id": resume.parse_task_id, "error": resume.parse_error}
+    result = {"resume_id": resume.id, "status": resume.parse_status, "error": resume.parse_error}
     if resume.parse_status == "COMPLETED":
         result["completed_at"] = resume.parse_completed_at
     return {"data": result}
@@ -599,7 +652,7 @@ def job_candidates(job_id: str, user: User = Depends(company_user), db: Session 
 @router.patch("/applications/{application_id}/status", tags=["applications"])
 def update_application_status(application_id: str, body: StatusUpdate, user: User = Depends(company_user), db: Session = Depends(get_db)):
     transitions = {
-        "APPLIED": {"ELIGIBILITY_CHECK", "ON_HOLD", "REJECTED"},
+        "APPLIED": {"ELIGIBILITY_CHECK", "RESUME_SCREENING", "HUMAN_REVIEW", "SHORTLISTED", "ON_HOLD", "REJECTED"},
         "ELIGIBILITY_CHECK": {"RESUME_SCREENING", "ON_HOLD", "REJECTED"},
         "RESUME_SCREENING": {"ASSESSMENT", "ON_HOLD", "REJECTED"},
         "ASSESSMENT": {"AI_INTERVIEW", "HUMAN_REVIEW", "ON_HOLD", "REJECTED"},

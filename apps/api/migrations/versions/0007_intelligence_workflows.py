@@ -9,6 +9,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if "interview_sessions" in inspect(op.get_bind()).get_table_names():
+        return
     op.add_column("resumes", sa.Column("parsed_text", sa.Text(), nullable=True))
     op.add_column("resumes", sa.Column("structured_data", sa.Text(), nullable=False, server_default="{}"))
     op.add_column("resumes", sa.Column("parser_version", sa.String(40), nullable=True))
