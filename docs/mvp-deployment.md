@@ -16,6 +16,10 @@ PDF and DOCX files up to 10 MB.
 
 Use the root `render.yaml` blueprint, or configure the service with:
 
+The Blueprint explicitly sets the API service to Render's `free` compute plan.
+Supabase remains the database, authentication, and storage provider, so this
+Blueprint does not create a paid Render database or any worker service.
+
 ```text
 Build:  pip install -r apps/api/requirements.txt
 Start: cd apps/api && alembic upgrade head && cd ../.. && uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir apps/api
