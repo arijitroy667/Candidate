@@ -27,7 +27,8 @@ function LoginContent() {
       return;
     }
     setMessage("Signed in successfully. Opening your workspace...");
-    router.push("/");
+    const nextRoute = result.data.user?.user_metadata?.role === "CANDIDATE" ? "/candidate/applications" : "/company/jobs";
+    router.push(nextRoute);
   }
 
   return <AuthForm title={`Welcome back to ${roleLabel}`} button="Sign in" message={message} onSubmit={submit} />;
