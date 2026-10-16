@@ -17,3 +17,56 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), sans-serif;
 }
+
+html {
+  scroll-behavior: smooth;
+}
+
+.hero-grid {
+  background-image: linear-gradient(rgba(67, 112, 99, 0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(67, 112, 99, 0.07) 1px, transparent 1px), radial-gradient(circle at 72% 10%, rgba(211, 232, 181, 0.72), transparent 28%);
+  background-size: 42px 42px, 42px 42px, auto;
+  mask-image: linear-gradient(to bottom, black 0%, transparent 90%);
+}
+
+.fade-up {
+  animation: fade-up 700ms ease-out both;
+}
+
+.modal-in {
+  animation: modal-in 180ms ease-out both;
+}
+
+.eyebrow {
+  color: #87a52e;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.section-title {
+  margin-top: 1rem;
+  color: #173f3a;
+  font-size: clamp(2.25rem, 5vw, 3.75rem);
+  font-weight: 600;
+  letter-spacing: -0.055em;
+  line-height: 1.03;
+}
+
+.section-copy {
+  margin-top: 1.25rem;
+  color: #71817a;
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.97) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}

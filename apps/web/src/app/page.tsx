@@ -5,56 +5,138 @@ import { useEffect, useState } from "react";
 import { api, type Job } from "../lib/api";
 import { createClient } from "../lib/supabase/client";
 
+type Modal = "login" | "demo" | null;
+
 export default function Home() {
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [message, setMessage] = useState("Loading your workspace...");
+  const [view, setView] = useState<"loading" | "landing" | "workspace">("loading");
   const [role, setRole] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const client = createClient();
-    client.auth.getSession().then(({ data }) => {
-      const session = data.session;
-      if (!session) { setMessage("Sign in to open your workspace."); return; }
-      setRole(session.user.user_metadata?.role ?? "CANDIDATE");
-      if (session.user.user_metadata?.role === "CANDIDATE") {
+    let active = true;
+    createClient().auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      const session = data?.session;
+      if (error || !session) {
+        setView("landing");
+        return;
+      }
+
+      const nextRole = session.user.user_metadata?.role ?? "CANDIDATE";
+      setRole(nextRole);
+      setView("workspace");
+      if (nextRole === "CANDIDATE") {
         setMessage("Your candidate workspace is ready.");
         return;
       }
+
+      setMessage("Loading your hiring workspace...");
       api.companyJobs(session.access_token)
-        .then((items) => { setJobs(items); setMessage(""); })
-        .catch((error: Error) => setMessage(error.message));
+        .then((items) => {
+          if (!active) return;
+          setJobs(items);
+          setMessage("");
+        })
+        .catch((reason: Error) => active && setMessage(reason.message));
     });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const isCandidate = role === "CANDIDATE";
+  if (view === "loading") return <LoadingScreen />;
+  if (view === "workspace") return <Workspace role={role} jobs={jobs} message={message} />;
+  return <LandingPage />;
+}
+
+function LandingPage() {
+  const [modal, setModal] = useState<Modal>(null);
+
   return (
-    <main className="min-h-screen bg-[#f5f7f2] px-6 py-8 text-[#1d2725] lg:px-12">
-      <div className="mx-auto max-w-6xl">
-        <header className="flex items-center justify-between border-b border-[#dfe6de] pb-6">
-          <div className="flex items-center gap-3 text-lg font-semibold"><span className="grid size-9 place-items-center rounded-xl bg-[#173f3a] text-sm text-[#d8f36b]">cx</span>candidex</div>
-          <nav className="flex items-center gap-3 text-sm">
-            <Link href={isCandidate ? "/jobs" : "/company/jobs"} className="rounded-lg px-3 py-2 text-[#287067]">{isCandidate ? "Find jobs" : "Jobs"}</Link>
-            <Link href={isCandidate ? "/candidate/applications" : "/company/jobs/new"} className="rounded-lg bg-[#173f3a] px-4 py-2.5 font-medium text-white">{isCandidate ? "My applications" : "Create job"}</Link>
-          </nav>
-        </header>
-        <section className="mt-12">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#82908a]">{isCandidate ? "Candidate workspace" : "Recruiter workspace"}</p>
-          <h1 className="mt-2 text-4xl font-semibold tracking-tight">Human-led hiring, with useful evidence.</h1>
-          <p className="mt-3 max-w-2xl text-[#6c7973]">Candidex keeps screening structured and explainable so people make the final hiring decision.</p>
-        </section>
-        {message && <p className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-5 text-sm text-[#6c7973]">{message}</p>}
-        {!isCandidate && !message && <section className="mt-8 grid gap-4 sm:grid-cols-3">
-          <Metric label="Active jobs" value={String(jobs.filter((job) => job.status === "PUBLISHED").length)} />
-          <Metric label="Draft jobs" value={String(jobs.filter((job) => job.status === "DRAFT").length)} />
-          <Metric label="Total roles" value={String(jobs.length)} />
-        </section>}
-        {!isCandidate && !message && <section className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-6">
-          <div className="flex items-center justify-between"><div><h2 className="font-semibold">Your hiring roles</h2><p className="mt-1 text-sm text-[#6c7973]">Create a job, confirm requirements, and publish it for candidates.</p></div><Link href="/company/jobs" className="text-sm font-medium text-[#287067]">View all →</Link></div>
-          <div className="mt-6 space-y-3">{jobs.slice(0, 5).map((job) => <div key={job.id} className="flex items-center justify-between rounded-lg bg-[#f5f7f2] p-4"><div><p className="font-medium">{job.title}</p><p className="mt-1 text-xs text-[#6c7973]">{job.location || "Remote"} · {job.skills.join(", ") || "No skills configured"}</p></div><span className="rounded-full bg-[#e7f0e6] px-3 py-1 text-xs font-medium text-[#287067]">{job.status}</span></div>)}</div>
-        </section>}
-      </div>
+    <main className="min-h-screen overflow-hidden bg-[#f7f8f4] text-[#172522]">
+      <div className="hero-grid pointer-events-none absolute inset-x-0 top-0 h-[760px] opacity-70" />
+      <header className="relative z-10 mx-auto flex max-w-7xl items-center justify-between px-6 py-6 lg:px-10">
+        <Link href="/" className="flex items-center gap-3" aria-label="Candidex home">
+          <span className="grid size-10 place-items-center rounded-[14px] bg-[#173f3a] text-sm font-bold tracking-tight text-[#d8f36b] shadow-[0_8px_24px_rgba(23,63,58,0.18)]">cx</span>
+          <span className="text-[17px] font-semibold tracking-[-0.03em]">candidex</span>
+        </Link>
+        <nav className="hidden items-center gap-8 text-sm text-[#65736d] md:flex">
+          <a href="#how-it-works" className="transition hover:text-[#173f3a]">How it works</a>
+          <a href="#for-teams" className="transition hover:text-[#173f3a]">For teams</a>
+          <a href="#for-candidates" className="transition hover:text-[#173f3a]">For candidates</a>
+        </nav>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setModal("login")} className="hidden rounded-full px-4 py-2 text-sm font-medium text-[#315d55] transition hover:bg-white md:block">Sign in</button>
+          <button onClick={() => setModal("login")} className="rounded-full bg-[#173f3a] px-4 py-2.5 text-sm font-medium text-white shadow-[0_8px_20px_rgba(23,63,58,0.16)] transition hover:-translate-y-0.5 hover:bg-[#22534c]">Get started <span aria-hidden="true">↗</span></button>
+        </div>
+      </header>
+
+      <section className="relative z-10 mx-auto grid max-w-7xl items-center gap-16 px-6 pb-24 pt-16 lg:grid-cols-[0.93fr_1.07fr] lg:px-10 lg:pb-32 lg:pt-24">
+        <div className="fade-up max-w-2xl">
+          <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-[#dbe5d9] bg-white/75 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#55736a] shadow-sm backdrop-blur"><span className="size-1.5 rounded-full bg-[#9bbd36]" /> Hiring intelligence, made human</div>
+          <h1 className="max-w-2xl text-5xl font-semibold leading-[0.98] tracking-[-0.065em] text-[#173f3a] sm:text-6xl lg:text-[76px]">Find the signal.<br /><span className="text-[#87a52e]">Keep the human</span><br />in the loop.</h1>
+          <p className="mt-7 max-w-xl text-lg leading-8 text-[#63736c]">Candidex gives growing teams a calmer way to hire: structured roles, evidence-rich screening, and decisions your team can explain.</p>
+          <div className="mt-9 flex flex-col gap-3 sm:flex-row"><button onClick={() => setModal("login")} className="group rounded-full bg-[#173f3a] px-6 py-3.5 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(23,63,58,0.2)] transition hover:-translate-y-0.5 hover:bg-[#22534c]">Open your workspace <span className="ml-2 transition group-hover:translate-x-1">→</span></button><button onClick={() => setModal("demo")} className="rounded-full border border-[#cbd9ca] bg-white/70 px-6 py-3.5 text-sm font-semibold text-[#315d55] transition hover:border-[#9fb79d] hover:bg-white">See how it works <span className="ml-2">▶</span></button></div>
+          <div className="mt-9 flex items-center gap-3 text-xs text-[#7b8a83]"><div className="flex -space-x-2"><span className="grid size-7 place-items-center rounded-full border-2 border-[#f7f8f4] bg-[#d5e4bf] text-[10px] font-semibold text-[#315d55]">AR</span><span className="grid size-7 place-items-center rounded-full border-2 border-[#f7f8f4] bg-[#ead7c2] text-[10px] font-semibold text-[#765640]">MK</span><span className="grid size-7 place-items-center rounded-full border-2 border-[#f7f8f4] bg-[#cbdce2] text-[10px] font-semibold text-[#3e6570]">JS</span></div><span>Built for thoughtful teams and ambitious candidates.</span></div>
+        </div>
+
+        <div className="relative mx-auto w-full max-w-[620px] lg:pt-5"><div className="absolute -right-8 -top-4 size-32 rounded-full bg-[#dcebb8] blur-3xl" /><div className="absolute -bottom-8 -left-8 size-48 rounded-full bg-[#c8e0dd] blur-3xl" /><div className="relative rounded-[28px] border border-white/80 bg-[#173f3a] p-3 shadow-[0_30px_80px_rgba(32,71,64,0.18)]"><div className="rounded-[21px] bg-[#f7f8f4] p-4 sm:p-5"><div className="flex items-center justify-between border-b border-[#e2e9df] pb-4"><div className="flex items-center gap-2"><span className="grid size-7 place-items-center rounded-lg bg-[#173f3a] text-[9px] font-bold text-[#d8f36b]">cx</span><span className="text-xs font-semibold text-[#315d55]">Recruiter workspace</span></div><span className="rounded-full bg-[#e6f0d0] px-2.5 py-1 text-[10px] font-semibold text-[#55721d]">LIVE PIPELINE</span></div><div className="grid gap-4 pt-5 sm:grid-cols-[0.82fr_1.18fr]"><div className="rounded-2xl border border-[#e1e9df] bg-white p-4"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#8a9991]">Open role</p><p className="mt-3 text-lg font-semibold tracking-tight text-[#173f3a]">Product Engineer</p><p className="mt-1 text-xs text-[#84918b]">Remote · Engineering</p><div className="mt-7 space-y-3"><div className="flex items-center justify-between text-[10px] text-[#71817a]"><span>Applicants</span><span className="font-semibold text-[#315d55]">24</span></div><div className="h-1.5 rounded-full bg-[#edf1eb]"><div className="h-1.5 w-[68%] rounded-full bg-[#a6bd54]" /></div><div className="flex items-center justify-between text-[10px] text-[#71817a]"><span>Shortlisted</span><span className="font-semibold text-[#315d55]">8</span></div><div className="h-1.5 rounded-full bg-[#edf1eb]"><div className="h-1.5 w-[34%] rounded-full bg-[#79aaa1]" /></div></div></div><div className="rounded-2xl border border-[#e1e9df] bg-white p-4"><div className="flex items-center justify-between"><div><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#8a9991]">Candidate signal</p><p className="mt-1 text-xs text-[#71817a]">Ranked by role evidence</p></div><span className="grid size-8 place-items-center rounded-full bg-[#edf4da] text-xs font-bold text-[#657d20]">94</span></div><div className="mt-4 rounded-xl bg-[#f6f8f3] p-3"><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-full bg-[#dce8e2] text-xs font-semibold text-[#315d55]">LM</span><div><p className="text-xs font-semibold text-[#263b35]">Leah Morgan</p><p className="text-[10px] text-[#84918b]">Product-minded backend engineer</p></div><span className="ml-auto rounded-full bg-[#e6f0d0] px-2 py-1 text-[9px] font-semibold text-[#55721d]">SHORTLIST</span></div><div className="mt-4 grid grid-cols-3 gap-2 text-center"><div className="rounded-lg bg-white p-2"><p className="text-sm font-semibold text-[#315d55]">96%</p><p className="text-[9px] text-[#8a9991]">Skills</p></div><div className="rounded-lg bg-white p-2"><p className="text-sm font-semibold text-[#315d55]">91%</p><p className="text-[9px] text-[#8a9991]">Experience</p></div><div className="rounded-lg bg-white p-2"><p className="text-sm font-semibold text-[#315d55]">A+</p><p className="text-[9px] text-[#8a9991]">Evidence</p></div></div></div><div className="mt-4 flex items-center gap-2 text-[10px] text-[#71817a]"><span className="size-1.5 rounded-full bg-[#9bbd36]" />Human review stays in control</div></div></div></div></div><div className="absolute -bottom-6 -right-5 hidden rounded-2xl border border-white bg-white px-4 py-3 shadow-[0_16px_35px_rgba(32,71,64,0.14)] sm:block"><p className="text-[10px] uppercase tracking-[0.14em] text-[#8a9991]">Decision clarity</p><p className="mt-1 text-sm font-semibold text-[#315d55]">Evidence over instinct.</p></div></div>
+      </section>
+
+      <section className="relative border-y border-[#e4eae2] bg-white/55"><div className="mx-auto grid max-w-7xl gap-6 px-6 py-8 sm:grid-cols-3 lg:px-10"><Signal icon="✦" title="Structured" copy="Every role starts with a clear, reviewable brief." /><Signal icon="◌" title="Explainable" copy="See the evidence behind every recommendation." /><Signal icon="↗" title="Human-led" copy="Automation supports judgment; it never replaces it." /></div></section>
+
+      <section id="how-it-works" className="mx-auto max-w-7xl px-6 py-24 lg:px-10 lg:py-32"><div className="max-w-2xl"><p className="eyebrow">A better hiring rhythm</p><h2 className="section-title">Less noise between the role and the right person.</h2><p className="section-copy">Candidex turns a scattered recruiting process into a focused loop that your team can trust.</p></div><div className="mt-14 grid gap-5 md:grid-cols-3"><Step number="01" title="Define the signal" copy="Turn the hiring brief into clear requirements, skills, and priorities before candidates enter the pipeline." /><Step number="02" title="Read the evidence" copy="Profiles, resumes, and structured signals come together in one calm recruiter view." /><Step number="03" title="Make the call" copy="Rank, shortlist, or hold with context your team can discuss and candidates can respect." /></div></section>
+
+      <section id="for-teams" className="bg-[#173f3a] px-6 py-24 text-white lg:px-10 lg:py-28"><div className="mx-auto max-w-7xl"><div className="grid gap-14 lg:grid-cols-[0.8fr_1.2fr] lg:items-end"><div><p className="eyebrow text-[#b7cf73]">Built for the whole hiring loop</p><h2 className="mt-4 max-w-xl text-4xl font-semibold leading-tight tracking-[-0.05em] sm:text-5xl">One workspace.<br />Three perspectives.</h2></div><p className="max-w-xl text-base leading-7 text-[#c6d7d0]">Hiring teams get a shared source of truth. Recruiters get momentum. Candidates get a process that feels considered from the first click.</p></div><div className="mt-14 grid gap-4 md:grid-cols-3"><RoleCard label="For companies" title="Build a hiring system that scales with your standards." copy="Create roles, align the team, and keep every decision grounded in the brief." icon="⌂" /><RoleCard label="For recruiters" title="Move faster without losing your judgment." copy="See who fits, why they fit, and what still needs a human conversation." icon="◈" /><RoleCard label="For candidates" title="Be seen for more than a keyword match." copy="Share your story once and move through a process designed around real signal." icon="◎" /></div></div></section>
+
+      <section id="for-candidates" className="mx-auto grid max-w-7xl gap-12 px-6 py-24 lg:grid-cols-[1.1fr_0.9fr] lg:items-center lg:px-10 lg:py-32"><div><p className="eyebrow">For candidates</p><h2 className="section-title max-w-xl">Your experience deserves context.</h2><p className="section-copy max-w-xl">Candidex helps teams look beyond the surface of a resume, so the work you have done and the way you think can actually make it into the conversation.</p><Link href="/jobs" className="mt-8 inline-flex rounded-full bg-[#173f3a] px-6 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-[#22534c]">Browse open roles <span className="ml-2">→</span></Link></div><div className="rounded-[28px] border border-[#dce6db] bg-[#eef3e9] p-5"><div className="rounded-2xl bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#8a9991]">Your candidate profile</p><p className="mt-2 text-xl font-semibold text-[#173f3a]">Tell the complete story.</p></div><span className="rounded-full bg-[#e6f0d0] px-2.5 py-1 text-[10px] font-semibold text-[#55721d]">READY</span></div><div className="mt-6 space-y-3"><ProfileLine label="Role fit" value="Strong" /><ProfileLine label="Experience" value="5 years" /><ProfileLine label="Skills" value="Python · APIs · Data" /></div></div></div></section>
+
+      <section className="px-6 pb-20 lg:px-10"><div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-8 rounded-[28px] bg-[#dceab8] px-7 py-10 sm:px-12 lg:flex-row lg:items-center"><div><p className="eyebrow text-[#55721d]">Start with the signal</p><h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.04em] text-[#173f3a] sm:text-4xl">Make your next hiring decision feel clearer.</h2></div><button onClick={() => setModal("login")} className="shrink-0 rounded-full bg-[#173f3a] px-6 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-[#22534c]">Enter Candidex <span className="ml-2">↗</span></button></div></section>
+
+      <footer className="mx-auto flex max-w-7xl flex-col gap-4 border-t border-[#e0e8de] px-6 py-8 text-xs text-[#7b8a83] sm:flex-row sm:items-center sm:justify-between lg:px-10"><div className="flex items-center gap-2 font-semibold text-[#315d55]"><span className="grid size-6 place-items-center rounded-md bg-[#173f3a] text-[8px] text-[#d8f36b]">cx</span>candidex</div><p>Human-led hiring intelligence for modern teams.</p><p>© 2026 Candidex</p></footer>
+
+      {modal && <AccessModal mode={modal} onClose={() => setModal(null)} onDemo={() => setModal("demo")} />}
     </main>
   );
+}
+
+function AccessModal({ mode, onClose, onDemo }: { mode: Exclude<Modal, null>; onClose: () => void; onDemo: () => void }) {
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-[#102d29]/55 p-4 backdrop-blur-sm" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section role="dialog" aria-modal="true" aria-labelledby="access-title" className="modal-in max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-[26px] border border-white/70 bg-[#f8faf5] p-5 shadow-[0_30px_90px_rgba(7,33,29,0.3)] sm:p-7"><div className="flex items-start justify-between"><div><p className="eyebrow">Welcome to Candidex</p><h2 id="access-title" className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-[#173f3a]">{mode === "login" ? "Choose your workspace" : "See the Candidex loop"}</h2><p className="mt-2 max-w-lg text-sm leading-6 text-[#6c7973]">{mode === "login" ? "Enter through the experience that matches your role. You can explore the product before creating anything." : "A simple, human-led flow from a clear role brief to a confident hiring decision."}</p></div><button onClick={onClose} aria-label="Close dialog" className="grid size-9 place-items-center rounded-full border border-[#dbe5d9] bg-white text-lg text-[#55736a] transition hover:bg-[#eef3e9]">×</button></div>{mode === "login" ? <div className="mt-7 grid gap-3 sm:grid-cols-2"><AccessCard title="Company" label="Set the hiring standard" copy="Create your company workspace and open roles." href="/login?role=company" icon="⌂" /><AccessCard title="Recruiter" label="Run the pipeline" copy="Review evidence, ranking, and candidate decisions." href="/login?role=recruiter" icon="◈" /><AccessCard title="Candidate" label="Find your next role" copy="Build your profile and apply with context." href="/login?role=candidate" icon="◎" /><button onClick={onDemo} className="rounded-2xl border border-[#dbe5d9] bg-[#eaf1df] p-4 text-left transition hover:border-[#a9c09e] sm:col-span-2"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-[#173f3a] text-[#d8f36b]">▶</span><div><p className="text-sm font-semibold text-[#173f3a]">See the product demo</p><p className="mt-1 text-xs leading-5 text-[#64756d]">Walk through the role, signal, and decision loop before signing in.</p></div><span className="ml-auto text-[#55736a]">→</span></div></button></div> : <div className="mt-7 space-y-3"><DemoRow number="01" title="Define the role" copy="Start with a clear brief and the requirements that actually matter." /><DemoRow number="02" title="Surface the signal" copy="Bring profiles, resumes, and structured evidence into one view." /><DemoRow number="03" title="Decide together" copy="Shortlist or hold with a reason your team can stand behind." /><div className="mt-5 flex flex-col gap-3 border-t border-[#e0e8de] pt-5 sm:flex-row"><Link href="/jobs" onClick={onClose} className="flex-1 rounded-full bg-[#173f3a] px-5 py-3 text-center text-sm font-semibold text-white">Browse candidate view →</Link><Link href="/register" onClick={onClose} className="flex-1 rounded-full border border-[#cbd9ca] bg-white px-5 py-3 text-center text-sm font-semibold text-[#315d55]">Create an account</Link></div></div>}</section></div>;
+}
+
+function AccessCard({ title, label, copy, href, icon }: { title: string; label: string; copy: string; href: string; icon: string }) {
+  return <Link href={href} className="group rounded-2xl border border-[#dbe5d9] bg-white p-4 transition hover:-translate-y-0.5 hover:border-[#a9c09e] hover:shadow-[0_12px_25px_rgba(31,75,65,0.08)]"><div className="flex items-start gap-3"><span className="grid size-10 place-items-center rounded-xl bg-[#eef3e9] text-lg text-[#315d55] transition group-hover:bg-[#dceab8]">{icon}</span><div><p className="text-sm font-semibold text-[#173f3a]">{title}</p><p className="mt-0.5 text-xs font-medium text-[#87a52e]">{label}</p><p className="mt-2 text-xs leading-5 text-[#71817a]">{copy}</p></div><span className="ml-auto text-[#8da198] transition group-hover:translate-x-1 group-hover:text-[#315d55]">↗</span></div></Link>;
+}
+
+function DemoRow({ number, title, copy }: { number: string; title: string; copy: string }) {
+  return <div className="flex gap-4 rounded-2xl border border-[#e0e8de] bg-white p-4"><span className="text-xs font-semibold text-[#a0b64b]">{number}</span><div><p className="text-sm font-semibold text-[#315d55]">{title}</p><p className="mt-1 text-xs leading-5 text-[#71817a]">{copy}</p></div></div>;
+}
+
+function Signal({ icon, title, copy }: { icon: string; title: string; copy: string }) {
+  return <div className="flex items-start gap-3"><span className="grid size-9 place-items-center rounded-xl bg-[#eaf1df] text-sm font-semibold text-[#709126]">{icon}</span><div><p className="text-sm font-semibold text-[#315d55]">{title}</p><p className="mt-1 text-xs leading-5 text-[#7b8a83]">{copy}</p></div></div>;
+}
+
+function Step({ number, title, copy }: { number: string; title: string; copy: string }) {
+  return <article className="rounded-[22px] border border-[#dfe8dc] bg-white p-6 shadow-[0_10px_35px_rgba(34,70,60,0.04)]"><span className="text-sm font-semibold text-[#a0b64b]">{number}</span><h3 className="mt-10 text-xl font-semibold tracking-[-0.03em] text-[#173f3a]">{title}</h3><p className="mt-3 text-sm leading-6 text-[#71817a]">{copy}</p></article>;
+}
+
+function RoleCard({ label, title, copy, icon }: { label: string; title: string; copy: string; icon: string }) {
+  return <article className="rounded-[22px] border border-[#39645d] bg-[#214c46] p-6 transition hover:-translate-y-1 hover:bg-[#28564f]"><span className="grid size-10 place-items-center rounded-xl bg-[#315f57] text-lg text-[#d8f36b]">{icon}</span><p className="mt-7 text-xs font-semibold uppercase tracking-[0.16em] text-[#b7cf73]">{label}</p><h3 className="mt-3 text-xl font-semibold leading-snug tracking-[-0.03em]">{title}</h3><p className="mt-3 text-sm leading-6 text-[#bed0c9]">{copy}</p></article>;
+}
+
+function ProfileLine({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-center justify-between border-b border-[#edf1eb] pb-3 text-sm last:border-0 last:pb-0"><span className="text-[#84918b]">{label}</span><span className="font-medium text-[#315d55]">{value}</span></div>;
+}
+
+function LoadingScreen() {
+  return <main className="grid min-h-screen place-items-center bg-[#f7f8f4] text-[#315d55]"><div className="text-center"><span className="mx-auto grid size-12 place-items-center rounded-2xl bg-[#173f3a] text-sm font-bold text-[#d8f36b]">cx</span><p className="mt-4 text-sm text-[#7b8a83]">Opening Candidex...</p></div></main>;
+}
+
+function Workspace({ role, jobs, message }: { role: string | null; jobs: Job[]; message: string }) {
+  const isCandidate = role === "CANDIDATE";
+  return <main className="min-h-screen bg-[#f5f7f2] px-6 py-8 text-[#1d2725] lg:px-12"><div className="mx-auto max-w-6xl"><header className="flex items-center justify-between border-b border-[#dfe6de] pb-6"><Link href="/" className="flex items-center gap-3 text-lg font-semibold"><span className="grid size-9 place-items-center rounded-xl bg-[#173f3a] text-sm text-[#d8f36b]">cx</span>candidex</Link><nav className="flex items-center gap-3 text-sm"><Link href={isCandidate ? "/jobs" : "/company/jobs"} className="rounded-lg px-3 py-2 text-[#287067]">{isCandidate ? "Find jobs" : "Jobs"}</Link><Link href={isCandidate ? "/candidate/applications" : "/company/jobs/new"} className="rounded-lg bg-[#173f3a] px-4 py-2.5 font-medium text-white">{isCandidate ? "My applications" : "Create job"}</Link></nav></header><section className="mt-12"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#82908a]">{isCandidate ? "Candidate workspace" : "Recruiter workspace"}</p><h1 className="mt-2 text-4xl font-semibold tracking-tight">Human-led hiring, with useful evidence.</h1><p className="mt-3 max-w-2xl text-[#6c7973]">Candidex keeps screening structured and explainable so people make the final hiring decision.</p></section>{message && <p className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-5 text-sm text-[#6c7973]">{message}</p>}{!isCandidate && !message && <><section className="mt-8 grid gap-4 sm:grid-cols-3"><Metric label="Active jobs" value={String(jobs.filter((job) => job.status === "PUBLISHED").length)} /><Metric label="Draft jobs" value={String(jobs.filter((job) => job.status === "DRAFT").length)} /><Metric label="Total roles" value={String(jobs.length)} /></section><section className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-6"><div className="flex items-center justify-between"><div><h2 className="font-semibold">Your hiring roles</h2><p className="mt-1 text-sm text-[#6c7973]">Create a job, confirm requirements, and publish it for candidates.</p></div><Link href="/company/jobs" className="text-sm font-medium text-[#287067]">View all →</Link></div><div className="mt-6 space-y-3">{jobs.slice(0, 5).map((job) => <div key={job.id} className="flex items-center justify-between rounded-lg bg-[#f5f7f2] p-4"><div><p className="font-medium">{job.title}</p><p className="mt-1 text-xs text-[#6c7973]">{job.location || "Remote"} · {job.skills.join(", ") || "No skills configured"}</p></div><span className="rounded-full bg-[#e7f0e6] px-3 py-1 text-xs font-medium text-[#287067]">{job.status}</span></div>)}</div></section></>}</div></main>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
