@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, type Job } from "../lib/api";
 import { createClient } from "../lib/supabase/client";
+import { SignOutButton } from "../components/workspace-header";
 
 type Modal = "login" | "demo" | null;
 
@@ -47,7 +48,7 @@ export default function Home() {
   }, []);
 
   if (view === "loading") return <LoadingScreen />;
-  if (view === "workspace") return <Workspace role={role} jobs={jobs} message={message} />;
+  if (view === "workspace") return <><Workspace role={role} jobs={jobs} message={message} /><div className="fixed right-6 top-20 z-20"><SignOutButton /></div></>;
   return <LandingPage />;
 }
 

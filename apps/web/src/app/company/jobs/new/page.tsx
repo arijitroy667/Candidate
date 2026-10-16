@@ -1,24 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "../../../../lib/api";
 import { createClient } from "../../../../lib/supabase/client";
+import WorkspaceHeader from "../../../../components/workspace-header";
 
 export default function NewJobPage() {
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setMessage("");
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
     const values = new FormData(event.currentTarget);
     const session = (await createClient().auth.getSession()).data.session;
-    if (!session) { setMessage("Sign in before creating a job."); setBusy(false); return; }
+    if (!session) {
+      setMessage("Sign in before creating a job.");
+      setBusy(false);
+      return;
+    }
     try {
       const job = await api.createJob(session.access_token, {
-        title: String(values.get("title")), description: String(values.get("description")),
-        department: String(values.get("department") || "") || null, location: String(values.get("location") || "") || null,
+        title: String(values.get("title")),
+        description: String(values.get("description")),
+        department: String(values.get("department") || "") || null,
+        location: String(values.get("location") || "") || null,
         employment_type: String(values.get("employment_type") || "") || null,
         skills: String(values.get("skills") || "").split(",").map((item) => item.trim()).filter(Boolean),
       });
@@ -26,10 +36,14 @@ export default function NewJobPage() {
       setMessage("Job created and requirements analyzed. Publishing it now...");
       await api.publishJob(session.access_token, job.id);
       router.push("/company/jobs");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to create job."); }
-    finally { setBusy(false); }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to create job.");
+    } finally {
+      setBusy(false);
+    }
   }
-  return <main className="min-h-screen bg-[#f5f7f2] px-6 py-10 text-[#1d2725] lg:px-20"><div className="mx-auto max-w-3xl"><Link href="/company/jobs" className="text-sm text-[#287067]">← Back to jobs</Link><h1 className="mt-6 text-4xl font-semibold">Create a hiring role</h1><p className="mt-3 text-[#6c7973]">Add the role details. Candidex will extract initial requirements, which your team can refine before using screening.</p><form onSubmit={submit} className="mt-8 space-y-5 rounded-xl border border-[#dfe6de] bg-white p-6"><Field label="Job title" name="title" required /><div className="grid gap-5 sm:grid-cols-2"><Field label="Department" name="department" /><Field label="Location" name="location" placeholder="Remote" /></div><Field label="Employment type" name="employment_type" placeholder="Full-time" /><Field label="Skills" name="skills" placeholder="Python, FastAPI, PostgreSQL" /><label className="block text-sm font-medium">Job description<textarea name="description" required minLength={20} rows={12} className="mt-2 w-full rounded-lg border border-[#dfe6de] p-3" placeholder="Describe the role, responsibilities, and experience required." /></label>{message && <p className="rounded-lg bg-[#f5f7f2] p-3 text-sm text-[#287067]">{message}</p>}<button disabled={busy} className="rounded-lg bg-[#173f3a] px-5 py-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Creating..." : "Create and publish"}</button></form></div></main>;
+
+  return <main className="min-h-screen bg-[#f5f7f2] px-6 py-8 text-[#1d2725] lg:px-20"><div className="mx-auto max-w-3xl"><WorkspaceHeader audience="company" /><Link href="/company/jobs" className="text-sm text-[#287067]">← Back to jobs</Link><h1 className="mt-6 text-4xl font-semibold">Create a hiring role</h1><p className="mt-3 text-[#6c7973]">Add the role details. Candidex will extract initial requirements, which your team can refine before using screening.</p><form onSubmit={submit} className="mt-8 space-y-5 rounded-xl border border-[#dfe6de] bg-white p-6"><Field label="Job title" name="title" required /><div className="grid gap-5 sm:grid-cols-2"><Field label="Department" name="department" /><Field label="Location" name="location" placeholder="Remote" /></div><Field label="Employment type" name="employment_type" placeholder="Full-time" /><Field label="Skills" name="skills" placeholder="Python, FastAPI, PostgreSQL" /><label className="block text-sm font-medium">Job description<textarea name="description" required minLength={20} rows={12} className="mt-2 w-full rounded-lg border border-[#dfe6de] p-3" placeholder="Describe the role, responsibilities, and experience required." /></label>{message && <p className="rounded-lg bg-[#f5f7f2] p-3 text-sm text-[#287067]">{message}</p>}<button disabled={busy} className="rounded-lg bg-[#173f3a] px-5 py-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Creating..." : "Create and publish"}</button></form></div></main>;
 }
 
 function Field({ label, name, required, placeholder }: { label: string; name: string; required?: boolean; placeholder?: string }) {
