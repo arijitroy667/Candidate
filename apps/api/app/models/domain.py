@@ -109,6 +109,8 @@ class Job(Base):
     department: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     employment_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    target_institute: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    target_email_domain: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     experience_required: Mapped[str | None] = mapped_column(String(80), nullable=True)
     skills: Mapped[str] = mapped_column(Text, default="[]")
     salary_range: Mapped[str | None] = mapped_column(String(100), nullable=True)

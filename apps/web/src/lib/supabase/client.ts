@@ -12,6 +12,7 @@ const unconfiguredClient = {
     getSession: async () => ({ data: { session: null }, error: configurationError }),
     signInWithPassword: async () => ({ data: { session: null, user: null }, error: configurationError }),
     signUp: async () => ({ data: { session: null, user: null }, error: configurationError }),
+    signOut: async () => ({ error: configurationError }),
   },
 } as unknown as BrowserClient;
 

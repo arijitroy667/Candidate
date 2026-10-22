@@ -1,7 +1,7 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 export type ApiResponse<T> = { data: T; meta?: Record<string, unknown> };
-export type Job = { id: string; title: string; description: string; company_id: string; location?: string; employment_type?: string; skills: string[]; status: string; scoring_config?: Record<string, number> };
+export type Job = { id: string; title: string; description: string; company_id: string; department?: string; location?: string; employment_type?: string; target_institute?: string | null; target_email_domain?: string | null; created_at?: string; skills: string[]; status: string; scoring_config?: Record<string, number> };
 export type Application = { id: string; job_id: string; status: string; created_at: string };
 export type CandidateProfile = { id: string; user_id: string; headline?: string; summary?: string; skills: string; experience: string; education: string };
 export type JobCandidate = { application: Application; profile: CandidateProfile | null; score: Record<string, unknown> | null };
@@ -27,6 +27,8 @@ export const api = {
   health: () => apiFetch<{ status: string; service: string }>("/health"),
   publicJobs: () => apiFetch<Job[]>("/public/jobs"),
   publicJob: (id: string) => apiFetch<Job>(`/public/jobs/${id}`),
+  instituteJobs: (token: string) => apiFetch<Job[]>("/institutes/jobs", {}, token),
+  candidateJob: (token: string, id: string) => apiFetch<Job>(`/candidate/jobs/${id}`, {}, token),
   applications: (token: string) => apiFetch<Application[]>("/applications", {}, token),
   companyJobs: (token: string) => apiFetch<Job[]>("/jobs", {}, token),
   createCompany: (token: string, body: Record<string, string>) => apiFetch<Record<string, unknown>>("/companies", { method: "POST", body: JSON.stringify(body) }, token),
@@ -35,6 +37,7 @@ export const api = {
   publishJob: (token: string, id: string) => apiFetch<Job>(`/jobs/${id}/publish`, { method: "POST" }, token),
   updateScoring: (token: string, id: string, body: Record<string, number>) => apiFetch<Job>(`/jobs/${id}/scoring`, { method: "PATCH", body: JSON.stringify(body) }, token),
   jobCandidates: (token: string, id: string) => apiFetch<JobCandidate[]>(`/jobs/${id}/candidates`, {}, token),
+  compareCandidates: (token: string, jobId: string, applicationIds: string[]) => apiFetch<Record<string, unknown>[]>(`/jobs/${jobId}/compare?application_ids=${applicationIds.join(",")}`, {}, token),
   recalculateRankings: (token: string, id: string) => apiFetch<Record<string, unknown>[]>(`/jobs/${id}/rankings/recalculate`, { method: "POST" }, token),
   updateApplicationStatus: (token: string, id: string, status: string) => apiFetch<Application>(`/applications/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }, token),
   profile: (token: string) => apiFetch<CandidateProfile>("/candidates/profile", {}, token),

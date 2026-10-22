@@ -50,6 +50,8 @@ class JobCreate(BaseModel):
     department: str | None = None
     location: str | None = None
     employment_type: str | None = None
+    target_institute: str | None = None
+    target_email_domain: str | None = None
     experience_required: str | None = None
     skills: list[str] = []
     salary_range: str | None = None
