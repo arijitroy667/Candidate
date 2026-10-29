@@ -29,3 +29,7 @@ Supabase owns auth and the database. Do not commit `.env`, service role keys, or
 ## Institute job visibility
 
 Company admins can target a role to any institute by entering its name and student email domain when creating the job. Signed-in candidates whose email domain matches can view and apply to that role; public roles remain available to all candidates.
+
+## Vercel deployment
+
+Set the Vercel project Root Directory to `apps/web` so Vercel detects the Next.js application and its dependencies.
