@@ -25,3 +25,7 @@ AI-assisted hiring workflow MVP built around human-controlled decisions.
 4. Visit `http://localhost:3000` and API docs at `http://localhost:8000/docs`.
 
 Supabase owns auth and the database. Do not commit `.env`, service role keys, or other secrets.
+
+## Institute job visibility
+
+Company admins can target a role to any institute by entering its name and student email domain when creating the job. Signed-in candidates whose email domain matches can view and apply to that role; public roles remain available to all candidates.
