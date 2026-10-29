@@ -55,6 +55,8 @@ class JobCreate(BaseModel):
     salary_range: str | None = None
     application_deadline: datetime | None = None
     pipeline_id: str | None = None
+    target_institute: str | None = None
+    target_email_domain: str | None = None
 
 
 class JobUpdate(JobCreate):

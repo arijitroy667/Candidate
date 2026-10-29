@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePath
 from uuid import uuid4
@@ -41,6 +42,17 @@ company_user = require_roles("COMPANY_ADMIN", "RECRUITER")
 
 def data(item):
     return {column.name: getattr(item, column.name) for column in item.__table__.columns}
+
+
+def normalize_job_audience(institute: str | None, email_domain: str | None) -> tuple[str | None, str | None]:
+    name = institute.strip() if institute and institute.strip() else None
+    domain = email_domain.strip().lower().lstrip("@") if email_domain and email_domain.strip() else None
+    if bool(name) != bool(domain):
+        raise HTTPException(400, "Enter both the institute name and student email domain, or leave both blank for a public role")
+    valid_domain = re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", domain or "")
+    if name and (len(name) > 80 or not valid_domain):
+        raise HTTPException(400, "Enter a valid institute name and student email domain, such as university.edu")
+    return name, domain
 
 
 def job_data(job: Job) -> dict:
@@ -276,18 +288,36 @@ def mark_all_notifications_read(user: User = Depends(get_current_user), db: Sess
 
 @router.get("/public/jobs", tags=["public"])
 def public_jobs(db: Session = Depends(get_db)):
-    jobs = db.scalars(select(Job).where(Job.status == "PUBLISHED").order_by(Job.created_at.desc())).all()
+    jobs = db.scalars(select(Job).where(Job.status == "PUBLISHED", Job.target_email_domain.is_(None)).order_by(Job.created_at.desc())).all()
     return {"data": [{**data(job), "skills": json.loads(job.skills)} for job in jobs]}
 
 
 @router.get("/public/jobs/{job_id}", tags=["public"])
 def public_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.scalar(select(Job).where(Job.id == job_id, Job.status == "PUBLISHED"))
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.status == "PUBLISHED", Job.target_email_domain.is_(None)))
     if not job:
         raise HTTPException(404, "Job not found")
     result = data(job)
     result["skills"] = json.loads(job.skills)
     return {"data": result}
+
+
+@router.get("/institutes/jobs", tags=["institutes"])
+def institute_jobs(user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    domain = user.email.lower().rsplit("@", 1)[-1] if "@" in user.email else ""
+    jobs = db.scalars(select(Job).where(Job.status == "PUBLISHED", func.lower(Job.target_email_domain) == domain).order_by(Job.created_at.desc())).all()
+    return {"data": [job_data(job) for job in jobs]}
+
+
+@router.get("/candidate/jobs/{job_id}", tags=["institutes"])
+def candidate_job(job_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.status == "PUBLISHED"))
+    if not job:
+        raise HTTPException(404, "Job not found")
+    domain = user.email.lower().rsplit("@", 1)[-1] if "@" in user.email else ""
+    if job.target_email_domain and job.target_email_domain.lower() != domain:
+        raise HTTPException(404, "Job not found")
+    return {"data": job_data(job)}
 
 
 @router.post("/pipelines", status_code=201, tags=["pipelines"])
@@ -332,7 +362,10 @@ def delete_pipeline(pipeline_id: str, user: User = Depends(company_user), db: Se
 
 @router.post("/jobs", status_code=201, tags=["jobs"])
 def create_job(body: JobCreate, user: User = Depends(company_user), db: Session = Depends(get_db)):
-    job = Job(company_id=company_for(db, user).id, created_by=user.id, skills=json.dumps(body.skills), **body.model_dump(exclude={"skills"}))
+    institute, domain = normalize_job_audience(body.target_institute, body.target_email_domain)
+    values = body.model_dump(exclude={"skills", "target_institute", "target_email_domain"})
+    values.update(target_institute=institute, target_email_domain=domain)
+    job = Job(company_id=company_for(db, user).id, created_by=user.id, skills=json.dumps(body.skills), **values)
     db.add(job); db.commit(); db.refresh(job); return {"data": job_data(job)}
 
 
@@ -355,6 +388,9 @@ def update_job(job_id: str, body: JobUpdate, user: User = Depends(company_user),
     if not job: raise HTTPException(404, "Job not found")
     values = body.model_dump(exclude_unset=True)
     if "skills" in values: values["skills"] = json.dumps(values["skills"])
+    if "target_institute" in values or "target_email_domain" in values:
+        institute, domain = normalize_job_audience(values.get("target_institute", job.target_institute), values.get("target_email_domain", job.target_email_domain))
+        values.update(target_institute=institute, target_email_domain=domain)
     for key, value in values.items(): setattr(job, key, value)
     db.commit(); db.refresh(job); return {"data": job_data(job)}
 
@@ -582,6 +618,8 @@ def parsed_resume(resume_id: str, user: User = Depends(get_current_user), db: Se
 def apply(job_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
     job = db.get(Job, job_id); profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
     if not job or job.status != "PUBLISHED": raise HTTPException(400, "Job is not published")
+    if job.target_email_domain and user.email.lower().rsplit("@", 1)[-1] != job.target_email_domain.lower():
+        raise HTTPException(404, "Job not found")
     if not profile: raise HTTPException(400, "Complete your candidate profile first")
     application = Application(job_id=job.id, candidate_id=profile.id); db.add(application)
     try:
