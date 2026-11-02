@@ -1,9 +1,10 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? (process.env.NODE_ENV === "development" ? "/api/v1" : "http://localhost:8000/api/v1");
 
 export type ApiResponse<T> = { data: T; meta?: Record<string, unknown> };
 export type Job = { id: string; title: string; description: string; company_id: string; location?: string; employment_type?: string; target_institute?: string | null; target_email_domain?: string | null; skills: string[]; status: string; scoring_config?: Record<string, number> };
 export type Application = { id: string; job_id: string; status: string; created_at: string };
 export type CandidateProfile = { id: string; user_id: string; headline?: string; summary?: string; skills: string; experience: string; education: string };
+export type CandidateResume = { id: string; file_name: string; parse_status: string; created_at: string };
 export type JobCandidate = { application: Application; profile: CandidateProfile | null; score: (Record<string, unknown> & { final_score?: number; confidence?: number; score_breakdown?: Record<string, unknown> }) | null; candidate_rank?: number | null; threshold?: number; threshold_result?: string; eligibility_passed?: boolean | null; scoring_config?: Record<string, number> };
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}, accessToken?: string): Promise<T> {
@@ -16,7 +17,13 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, acces
       ...options.headers,
     },
   });
-  const payload = (await response.json()) as ApiResponse<T> | { detail?: string };
+  const responseText = await response.text();
+  let payload: ApiResponse<T> | { detail?: string };
+  try {
+    payload = JSON.parse(responseText) as ApiResponse<T> | { detail?: string };
+  } catch {
+    throw new Error("The API returned an unreadable response. Start the API in a separate PowerShell window and keep it running at localhost:8000.");
+  }
   if (!response.ok) {
     throw new Error("detail" in payload && payload.detail ? payload.detail : "Request failed");
   }
@@ -31,6 +38,7 @@ export const api = {
   candidateJob: (token: string, id: string) => apiFetch<Job>(`/candidate/jobs/${id}`, {}, token),
   applications: (token: string) => apiFetch<Application[]>("/applications", {}, token),
   companyJobs: (token: string) => apiFetch<Job[]>("/jobs", {}, token),
+  companyProfile: (token: string) => apiFetch<Record<string, unknown>>("/companies/me", {}, token),
   job: (token: string, id: string) => apiFetch<Job>(`/jobs/${id}`, {}, token),
   createCompany: (token: string, body: Record<string, string>) => apiFetch<Record<string, unknown>>("/companies", { method: "POST", body: JSON.stringify(body) }, token),
   createJob: (token: string, body: Record<string, unknown>) => apiFetch<Job>("/jobs", { method: "POST", body: JSON.stringify(body) }, token),
@@ -41,6 +49,7 @@ export const api = {
   recalculateRankings: (token: string, id: string) => apiFetch<Record<string, unknown>[]>(`/jobs/${id}/rankings/recalculate`, { method: "POST" }, token),
   updateApplicationStatus: (token: string, id: string, status: string) => apiFetch<Application>(`/applications/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }, token),
   profile: (token: string) => apiFetch<CandidateProfile>("/candidates/profile", {}, token),
+  resumes: (token: string) => apiFetch<CandidateResume[]>("/candidates/resumes", {}, token),
   saveProfile: (token: string, body: Record<string, unknown>) => apiFetch<CandidateProfile>("/candidates/profile", { method: "POST", body: JSON.stringify(body) }, token),
   uploadResume: (token: string, file: File) => { const body = new FormData(); body.append("file", file); return apiFetch<Record<string, unknown>>("/candidates/resumes/upload", { method: "POST", body }, token); },
   apply: (token: string, jobId: string) => apiFetch<Application>(`/jobs/${jobId}/apply`, { method: "POST" }, token),
