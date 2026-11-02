@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import type { Job } from "../lib/api";
 
 type Modal = "login" | "demo" | null;
 
@@ -87,17 +86,4 @@ function RoleCard({ label, title, copy, icon }: { label: string; title: string; 
 
 function ProfileLine({ label, value }: { label: string; value: string }) {
   return <div className="flex items-center justify-between border-b border-[#edf1eb] pb-3 text-sm last:border-0 last:pb-0"><span className="text-[#84918b]">{label}</span><span className="font-medium text-[#315d55]">{value}</span></div>;
-}
-
-export function LoadingScreen() {
-  return <main className="grid min-h-screen place-items-center bg-[#f7f8f4] text-[#315d55]"><div className="text-center"><span className="mx-auto grid size-12 place-items-center rounded-2xl bg-[#173f3a] text-sm font-bold text-[#d8f36b]">cx</span><p className="mt-4 text-sm text-[#7b8a83]">Opening Candidex...</p></div></main>;
-}
-
-export function Workspace({ role, jobs, message }: { role: string | null; jobs: Job[]; message: string }) {
-  const isCandidate = role === "CANDIDATE";
-  return <main className="min-h-screen bg-[#f5f7f2] px-6 py-8 text-[#1d2725] lg:px-12"><div className="mx-auto max-w-6xl"><header className="flex items-center justify-between border-b border-[#dfe6de] pb-6"><Link href="/" className="flex items-center gap-3 text-lg font-semibold"><span className="grid size-9 place-items-center rounded-xl bg-[#173f3a] text-sm text-[#d8f36b]">cx</span>candidex</Link><nav className="flex items-center gap-3 text-sm"><Link href={isCandidate ? "/jobs" : "/company/jobs"} className="rounded-lg px-3 py-2 text-[#287067]">{isCandidate ? "Find jobs" : "Jobs"}</Link><Link href={isCandidate ? "/candidate/applications" : "/company/jobs/new"} className="rounded-lg bg-[#173f3a] px-4 py-2.5 font-medium text-white">{isCandidate ? "My applications" : "Create job"}</Link></nav></header><section className="mt-12"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#82908a]">{isCandidate ? "Candidate workspace" : "Recruiter workspace"}</p><h1 className="mt-2 text-4xl font-semibold tracking-tight">Human-led hiring, with useful evidence.</h1><p className="mt-3 max-w-2xl text-[#6c7973]">Candidex keeps screening structured and explainable so people make the final hiring decision.</p></section>{message && <p className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-5 text-sm text-[#6c7973]">{message}</p>}{!isCandidate && !message && <><section className="mt-8 grid gap-4 sm:grid-cols-3"><Metric label="Active jobs" value={String(jobs.filter((job) => job.status === "PUBLISHED").length)} /><Metric label="Draft jobs" value={String(jobs.filter((job) => job.status === "DRAFT").length)} /><Metric label="Total roles" value={String(jobs.length)} /></section><section className="mt-8 rounded-xl border border-[#dfe6de] bg-white p-6"><div className="flex items-center justify-between"><div><h2 className="font-semibold">Your hiring roles</h2><p className="mt-1 text-sm text-[#6c7973]">Create a job, confirm requirements, and publish it for candidates.</p></div><Link href="/company/jobs" className="text-sm font-medium text-[#287067]">View all →</Link></div><div className="mt-6 space-y-3">{jobs.slice(0, 5).map((job) => <div key={job.id} className="flex items-center justify-between rounded-lg bg-[#f5f7f2] p-4"><div><p className="font-medium">{job.title}</p><p className="mt-1 text-xs text-[#6c7973]">{job.location || "Remote"} · {job.skills.join(", ") || "No skills configured"}</p></div><span className="rounded-full bg-[#e7f0e6] px-3 py-1 text-xs font-medium text-[#287067]">{job.status}</span></div>)}</div></section></>}</div></main>;
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-xl border border-[#dfe6de] bg-white p-5"><p className="text-sm text-[#6c7973]">{label}</p><p className="mt-3 text-3xl font-semibold">{value}</p></div>;
 }

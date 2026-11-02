@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,8 +16,11 @@ class Settings(BaseSettings):
     jwt_expiry_minutes: int = 60
     supabase_storage_bucket: str = "resumes"
     llm_provider: str = "gemini"
-    llm_api_key: str = ""
-    llm_model: str = "gemini-3.6-flash"
+    llm_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
+    llm_model: str = "gemini-3.8-flash"
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).resolve().parents[4] / ".env", Path(__file__).resolve().parents[2] / ".env"),

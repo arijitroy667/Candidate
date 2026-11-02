@@ -4,7 +4,7 @@ export type ApiResponse<T> = { data: T; meta?: Record<string, unknown> };
 export type Job = { id: string; title: string; description: string; company_id: string; location?: string; employment_type?: string; target_institute?: string | null; target_email_domain?: string | null; skills: string[]; status: string; scoring_config?: Record<string, number> };
 export type Application = { id: string; job_id: string; status: string; created_at: string };
 export type CandidateProfile = { id: string; user_id: string; headline?: string; summary?: string; skills: string; experience: string; education: string };
-export type JobCandidate = { application: Application; profile: CandidateProfile | null; score: Record<string, unknown> | null };
+export type JobCandidate = { application: Application; profile: CandidateProfile | null; score: (Record<string, unknown> & { final_score?: number; confidence?: number; score_breakdown?: Record<string, unknown> }) | null; candidate_rank?: number | null; threshold?: number; threshold_result?: string; eligibility_passed?: boolean | null; scoring_config?: Record<string, number> };
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}, accessToken?: string): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -31,6 +31,7 @@ export const api = {
   candidateJob: (token: string, id: string) => apiFetch<Job>(`/candidate/jobs/${id}`, {}, token),
   applications: (token: string) => apiFetch<Application[]>("/applications", {}, token),
   companyJobs: (token: string) => apiFetch<Job[]>("/jobs", {}, token),
+  job: (token: string, id: string) => apiFetch<Job>(`/jobs/${id}`, {}, token),
   createCompany: (token: string, body: Record<string, string>) => apiFetch<Record<string, unknown>>("/companies", { method: "POST", body: JSON.stringify(body) }, token),
   createJob: (token: string, body: Record<string, unknown>) => apiFetch<Job>("/jobs", { method: "POST", body: JSON.stringify(body) }, token),
   analyzeJob: (token: string, id: string) => apiFetch<Record<string, unknown>>(`/jobs/${id}/analyze-jd`, { method: "POST" }, token),

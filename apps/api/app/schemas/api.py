@@ -80,6 +80,7 @@ class ScoringConfigUpdate(BaseModel):
     interview: float = Field(ge=0, le=1)
     communication: float = Field(ge=0, le=1)
     experience: float = Field(ge=0, le=1)
+    threshold: float = Field(default=70, ge=0, le=100)
 
 
 class PipelineStageCreate(BaseModel):

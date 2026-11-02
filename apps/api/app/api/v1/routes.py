@@ -423,7 +423,8 @@ def update_scoring(job_id: str, body: ScoringConfigUpdate, user: User = Depends(
     if not job:
         raise HTTPException(404, "Job not found")
     config = body.model_dump()
-    if round(sum(config.values()), 6) != 1.0:
+    weights = {key: value for key, value in config.items() if key != "threshold"}
+    if round(sum(weights.values()), 6) != 1.0:
         raise HTTPException(422, "Scoring weights must sum to 1.0")
     job.scoring_config = json.dumps(config)
     audit(db, job.company_id, user.id, "JOB", job.id, "SCORING_UPDATED", new=config)
@@ -680,10 +681,27 @@ def job_candidates(job_id: str, user: User = Depends(company_user), db: Session 
         raise HTTPException(404, "Job not found")
     applications = db.scalars(select(Application).where(Application.job_id == job.id)).all()
     result = []
+    rankings = {
+        item.application_id: item
+        for item in db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id)).all()
+    }
+    threshold = float(json.loads(job.scoring_config or "{}").get("threshold", 70))
     for application in applications:
         profile = db.get(CandidateProfile, application.candidate_id)
         score = db.scalar(select(CandidateScore).where(CandidateScore.application_id == application.id))
-        result.append({"application": data(application), "profile": data(profile) if profile else None, "score": data(score) if score else None})
+        rank = rankings.get(application.id)
+        breakdown = json.loads(score.score_breakdown or "{}") if score else {}
+        result.append({
+            "application": data(application),
+            "profile": data(profile) if profile else None,
+            "score": data(score) | {"score_breakdown": breakdown} if score else None,
+            "candidate_rank": rank.rank if rank else None,
+            "threshold": threshold,
+            "threshold_result": "ABOVE" if score and score.final_score >= threshold else "BELOW" if score else "NOT_EVALUATED",
+            "eligibility_passed": rank.eligibility_passed if rank else breakdown.get("eligibility", {}).get("status") == "PASS" if score else None,
+            "scoring_config": json.loads(job.scoring_config or "{}"),
+        })
+    result.sort(key=lambda item: (item["candidate_rank"] is None, item["candidate_rank"] or 0, item["application"]["created_at"]))
     return {"data": result}
 
 
@@ -1030,15 +1048,37 @@ def recalculate_rankings(job_id: str, user: User = Depends(company_user), db: Se
     applications = db.scalars(select(Application).where(Application.job_id == job.id)).all()
     scores = []
     for application in applications:
-        scores.append(calculate_score(db, application, job))
+        score = calculate_score(db, application, job)
+        breakdown = json.loads(score.score_breakdown or "{}")
+        eligibility = breakdown.get("eligibility", {})
+        eligibility_status = eligibility.get("status", "NOT_EVALUATED")
+        scores.append((score, eligibility_status, len(breakdown.get("resume_assessment", {}).get("gaps", []))))
     db.flush()
     for old in db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id)).all():
         db.delete(old)
-    ordered = sorted(scores, key=lambda item: (-item.final_score, -item.confidence, item.application_id))
-    for index, score in enumerate(ordered, start=1):
-        db.add(CandidateRanking(job_id=job.id, application_id=score.application_id, rank=index, final_score=score.final_score, confidence=score.confidence))
+    ordered = sorted(scores, key=lambda item: (
+        {"PASS": 0, "NOT_EVALUATED": 1, "FAIL": 2}.get(item[1], 1),
+        -item[0].final_score,
+        -item[0].confidence,
+        -(item[0].assessment_score or 0),
+        item[2],
+        item[0].application_id,
+    ))
+    threshold = float(json.loads(job.scoring_config or "{}").get("threshold", 70))
+    for index, (score, eligibility_status, _) in enumerate(ordered, start=1):
+        db.add(CandidateRanking(job_id=job.id, application_id=score.application_id, rank=index, final_score=score.final_score, confidence=score.confidence, eligibility_passed=eligibility_status != "FAIL", ranking_version="resume-ai-v1"))
+    audit(db, job.company_id, user.id, "JOB", job.id, "RANKINGS_RECALCULATED", new={"candidate_count": len(ordered), "threshold": threshold, "ranking_version": "resume-ai-v1"})
     db.commit()
-    return {"data": [{"rank": index, "application_id": score.application_id, "final_score": score.final_score, "confidence": score.confidence} for index, score in enumerate(ordered, start=1)]}
+    return {"data": [{
+        "rank": index,
+        "application_id": score.application_id,
+        "final_score": score.final_score,
+        "confidence": score.confidence,
+        "eligibility": eligibility_status,
+        "threshold": threshold,
+        "threshold_result": "ABOVE" if score.final_score >= threshold else "BELOW",
+        "score_breakdown": json.loads(score.score_breakdown or "{}"),
+    } for index, (score, eligibility_status, _) in enumerate(ordered, start=1)]}
 
 
 @router.get("/jobs/{job_id}/rankings", tags=["ranking"])
@@ -1046,7 +1086,17 @@ def list_rankings(job_id: str, user: User = Depends(company_user), db: Session =
     job = db.scalar(select(Job).where(Job.id == job_id, Job.company_id == company_for(db, user).id))
     if not job:
         raise HTTPException(404, "Job not found")
-    return {"data": [data(item) for item in db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id).order_by(CandidateRanking.rank)).all()]}
+    threshold = float(json.loads(job.scoring_config or "{}").get("threshold", 70))
+    rankings = db.scalars(select(CandidateRanking).where(CandidateRanking.job_id == job.id).order_by(CandidateRanking.rank)).all()
+    results = []
+    for item in rankings:
+        score = db.scalar(select(CandidateScore).where(CandidateScore.application_id == item.application_id))
+        results.append(data(item) | {
+            "threshold": threshold,
+            "threshold_result": "ABOVE" if item.final_score >= threshold else "BELOW",
+            "score_breakdown": json.loads(score.score_breakdown or "{}") if score else {},
+        })
+    return {"data": results}
 
 
 @router.get("/jobs/{job_id}/compare", tags=["ranking"])
@@ -1084,8 +1134,6 @@ def check_eligibility(application_id: str, user: User = Depends(company_user), d
     requirements_data = requirement_payload(requirements)
     result = eligibility_check(requirements_data, resume.parsed_text, {"experience": json.loads(profile.experience) if profile else []})
     audit(db, job.company_id, user.id, "APPLICATION", application.id, "ELIGIBILITY_CHECKED", new=result)
-    if not result["eligible"]:
-        application.status = "REJECTED"
     db.commit()
     return {"data": result}
 
