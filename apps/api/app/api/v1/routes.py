@@ -6,6 +6,7 @@ from pathlib import PurePath
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -33,7 +34,8 @@ from app.services.notifications import (create_notification, mark_read, notifica
 from app.services.intelligence import audit, calculate_score, evaluate_interview, interview_prompt
 from app.services.requirements import analyze_job_description, eligibility_check
 from app.services.resume_pipeline import extract_structured_resume, extract_text
-from app.services.storage import create_download_url, upload_bytes
+from app.services.storage import (StorageUnavailableError, create_download_url,
+                                  download_bytes, upload_bytes, uses_local_storage)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -537,10 +539,11 @@ def upload_resume(file: UploadFile = File(...), user: User = Depends(require_rol
     storage_key = f"resumes/{user.id}/{uuid4()}-{safe_name}"
     try:
         upload_bytes(storage_key, content, file.content_type)
-    except RuntimeError as error:
+    except StorageUnavailableError as error:
         raise HTTPException(503, str(error)) from error
     except Exception as error:
-        raise HTTPException(503, "Resume storage is unavailable; verify the Supabase resumes bucket and service-role key") from error
+        logger.exception("Unexpected error while storing a resume")
+        raise HTTPException(503, "Resume storage failed unexpectedly. Check the API logs for details.") from error
     resume = Resume(candidate_id=profile.id, file_name=safe_name, storage_key=storage_key, mime_type=file.content_type, parse_status="UPLOADED")
     db.add(resume); db.commit(); db.refresh(resume)
     try:
@@ -558,13 +561,42 @@ def resume_download_url(resume_id: str, user: User = Depends(require_roles("CAND
     resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == (profile.id if profile else "")))
     if not resume:
         raise HTTPException(404, "Resume not found")
+    if uses_local_storage():
+        return {"data": {"url": None, "download_endpoint": f"/api/v1/candidates/resumes/{resume.id}/download", "expires_in": None}}
     try:
         url = create_download_url(resume.storage_key)
-    except RuntimeError as error:
+    except StorageUnavailableError as error:
         raise HTTPException(503, str(error)) from error
     except Exception as error:
-        raise HTTPException(503, "Resume storage is unavailable; verify the Supabase resumes bucket and service-role key") from error
+        logger.exception("Unexpected error while creating a resume download link")
+        raise HTTPException(503, "Resume download failed unexpectedly. Check the API logs for details.") from error
     return {"data": {"url": url, "expires_in": 600}}
+
+
+@router.get("/candidates/resumes/{resume_id}/download", tags=["candidates"])
+def download_resume(resume_id: str, user: User = Depends(require_roles("CANDIDATE")), db: Session = Depends(get_db)):
+    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    resume = db.scalar(
+        select(Resume).where(
+            Resume.id == resume_id,
+            Resume.candidate_id == (profile.id if profile else ""),
+        )
+    )
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    try:
+        content = download_bytes(resume.storage_key)
+    except StorageUnavailableError as error:
+        raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        logger.exception("Unexpected error while downloading a resume")
+        raise HTTPException(503, "Resume download failed unexpectedly. Check the API logs for details.") from error
+    filename = resume.file_name.replace('"', "'")
+    return Response(
+        content=content,
+        media_type=resume.mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/candidates/resumes", tags=["candidates"])
